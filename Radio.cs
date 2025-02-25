@@ -5,6 +5,31 @@ using SIPSorcery.Net;
 
 namespace rc2_core
 {
+    // Program return codes
+    public enum ERRNO : int
+    {
+        /// <summary>
+        /// No errors, normal exit
+        /// </summary>
+        ENOERROR = 0,
+        /// <summary>
+        /// Bad command line options provided
+        /// </summary>
+        EBADOPTIONS = 1,
+        /// <summary>
+        /// No config file provided
+        /// </summary>
+        ENOCONFIG = 2,
+        /// <summary>
+        /// Config file malformed
+        /// </summary>
+        EBADCONFIG = 3,
+        /// <summary>
+        /// Unhandled exit code
+        /// </summary>
+        EUNHANDLED = 99
+    }
+
     // Valid states a radio can be in
     public enum RadioState
     {
