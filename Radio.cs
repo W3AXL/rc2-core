@@ -136,13 +136,7 @@ namespace rc2_core
         // The text string to match
         public string Match { get; set; }
         // The text string to replace the matched text with
-        public string Replacement { get; set; }
-
-        public TextLookup(string match, string replacement)
-        {
-            Match = match;
-            Replacement = replacement;
-        }
+        public string Replace { get; set; }
     }
 
     /// <summary>
@@ -224,7 +218,7 @@ namespace rc2_core
         public Radio(
             string name, string desc, bool rxOnly,
             IPAddress listenAddress, int listenPort,
-            List<Softkey> softkeys = null,
+            List<SoftkeyName> softkeys = null,
             List<TextLookup> zoneLookups = null,
             List<TextLookup> chanLookups = null,
             Action<short[]> txAudioCallback = null, int txAudioSampleRate = 8000)
@@ -245,8 +239,15 @@ namespace rc2_core
             Status.Description = desc;
             // Set RX Only
             RxOnly = true;
-            // Save softkeys
-            if (softkeys != null) { Status.Softkeys = softkeys; }
+            // Create a softkey list
+            if (softkeys != null) 
+            { 
+                foreach(SoftkeyName softkey in softkeys)
+                {
+                    Softkey key = new Softkey(softkey);
+                    Status.Softkeys.Add(key);
+                }
+            }
             // Save lookups
             if (zoneLookups != null) { ZoneLookups = zoneLookups; }
             if (chanLookups != null) { ChanLookups = chanLookups; }
@@ -256,7 +257,7 @@ namespace rc2_core
         /// Start the radio
         /// </summary>
         /// <param name="reset">Whether to reset the radio or not</param>
-        public void Start(bool reset = false)
+        public virtual void Start(bool reset = false)
         {
             Log.Logger.Information($"Starting radio {name}");
             // Start the server
@@ -270,7 +271,7 @@ namespace rc2_core
         /// <summary>
         /// Stop the radio
         /// </summary>
-        public void Stop()
+        public virtual void Stop()
         {
             Log.Logger.Information($"Stopping radio {name}");
             // Stop the server
@@ -282,7 +283,7 @@ namespace rc2_core
         /// Confusing, I know
         /// Basically it goes like this (for SB9600) SB9600.StatusCallback() -> Radio.RadioStatusCallback() -> DaemonWebsocket.SendRadioStatus()
         /// </summary>
-        private void RadioStatusCallback()
+        public void RadioStatusCallback()
         {
             Log.Logger.Verbose("Got radio status callback from interface");
             // Perform lookups on zone/channel names (radio-control-type agnostic)
@@ -293,14 +294,14 @@ namespace rc2_core
                     // An empty string for the match indicates we should always replace the zone name with the replacement
                     if (lookup.Match == "")
                     {
-                        Log.Logger.Verbose("Empty lookup {replacement} found for zone name, overriding all other lookups", lookup.Replacement);
-                        Status.ZoneName = lookup.Replacement;
+                        Log.Logger.Verbose("Empty lookup {replacement} found for zone name, overriding all other lookups", lookup.Replace);
+                        Status.ZoneName = lookup.Replace;
                         break;
                     }
                     if (Status.ZoneName.Contains(lookup.Match))
                     {
-                        Log.Logger.Verbose("Found zone text {ZoneName} from {Match} in original text {Text}", lookup.Replacement, lookup.Match, Status.ZoneName);
-                        Status.ZoneName = lookup.Replacement;
+                        Log.Logger.Verbose("Found zone text {ZoneName} from {Match} in original text {Text}", lookup.Replace, lookup.Match, Status.ZoneName);
+                        Status.ZoneName = lookup.Replace;
                     }
                 }
             }
@@ -310,8 +311,8 @@ namespace rc2_core
                 {
                     if (Status.ChannelName.Contains(lookup.Match))
                     {
-                        Log.Logger.Verbose("Found channel text {ChannelName} from {Match} in original text {Text}", lookup.Replacement, lookup.Match, Status.ChannelName);
-                        Status.ChannelName = lookup.Replacement;
+                        Log.Logger.Verbose("Found channel text {ChannelName} from {Match} in original text {Text}", lookup.Replace, lookup.Match, Status.ChannelName);
+                        Status.ChannelName = lookup.Replace;
                     }
                 }
             }
