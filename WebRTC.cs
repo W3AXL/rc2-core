@@ -51,7 +51,7 @@ namespace rc2_core
         // WebRTC variables
         private MediaStreamTrack RtcTrack;
         private RTCPeerConnection pc;
-        public string Codec { get; set; } = "G722";
+        public const string Codec = "G722";
 
         // Flag whether our radio is RX only
         public bool RxOnly {get; set;} = false;
@@ -64,6 +64,9 @@ namespace rc2_core
 
         // Callback for receiving audio from the peer connection
         private Action<short[]> TxCallback;
+
+        // Callback for when the audio formats have been negotiated for the peer connection
+        public Action<AudioFormat> RTCFormatCallback;
 
         public WebRTC(Action<short[]> txCallback, int txSampleRate)
         {
@@ -228,6 +231,8 @@ namespace rc2_core
                     //TxEndpoint.SetAudioSinkFormat(TxFormat);
                     Log.Logger.Debug("Negotiated TX audio format {AudioFormat} ({ClockRate}/{Chs})", TxFormat.FormatName, TxFormat.ClockRate, TxFormat.ChannelCount);
                 }
+                // Fire the callback
+                RTCFormatCallback(RxFormat);
             };
 
             // Connection state change callback

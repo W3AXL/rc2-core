@@ -38,13 +38,27 @@ namespace rc2_core
             }
         }
 
-        public RC2Server(IPAddress address, int port, Radio _radio, Action<short[]> txAudioCallback, int txAudioSampleRate)
+        /// <summary>
+        /// Create a new instance of a RadioConsole2 Websocket/WebRTC server
+        /// </summary>
+        /// <param name="address">listen address for the server</param>
+        /// <param name="port">listen port for the server</param>
+        /// <param name="_radio">parent radio instance</param>
+        /// <param name="txAudioCallback">callback to handle TX audio samples from WebRTC connection</param>
+        /// <param name="txAudioSampleRate">sample rate the TX audio callback is expecting</param>
+        /// <param name="rtcFormatCallback">callback when WebRTC audio formats are negotiated</param>
+        public RC2Server(IPAddress address, int port, Radio _radio, Action<short[]> txAudioCallback, int txAudioSampleRate, Action<AudioFormat> rtcFormatCallback = null)
         {
             wss = new WebSocketServer(address, port);
             rtc = new WebRTC(txAudioCallback, txAudioSampleRate);
             radio = _radio;
             // Bind status callback
             radio.StatusCallback += SendRadioStatus;
+            // Bind format callback
+            if (rtcFormatCallback != null)
+            {
+                rtc.RTCFormatCallback += rtcFormatCallback;
+            }
         }
 
         public void Start()
@@ -113,6 +127,11 @@ namespace rc2_core
         public void RxSendPCM16Samples(short[] samples, uint samplerate)
         {
             rtc.RxAudioCallback16(samples, samplerate);
+        }
+
+        public void RxSendEncodedSamples(uint durationRtpUnits, byte[] encodedSamples)
+        {
+            rtc.RxAudioCallback(durationRtpUnits, encodedSamples);
         }
     }
 

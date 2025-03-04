@@ -2,6 +2,7 @@
 using Newtonsoft.Json;
 using System.Net;
 using SIPSorcery.Net;
+using SIPSorceryMedia.Abstractions;
 
 namespace rc2_core
 {
@@ -209,19 +210,27 @@ namespace rc2_core
         private RC2Server server { get; set; }
 
         /// <summary>
-        /// Overload for a basic radio that does nothing
+        /// Base radio class, does nothing on its own other than instantiate the WebRTC and Websocket connections
         /// </summary>
-        /// <param name="type"></param>
-        /// <param name="rxOnly"></param>
-        /// <param name="zoneName"></param>
-        /// <param name="channelName"></param>
+        /// <param name="name">name of the radio</param>
+        /// <param name="desc">description of the radio</param>
+        /// <param name="rxOnly">whether the radio is RX only (TX disabled)</param>
+        /// <param name="listenAddress">listen address for the radio</param>
+        /// <param name="listenPort">listen port for the radio</param>
+        /// <param name="softkeys">list of softkeys for the radio</param>
+        /// <param name="zoneLookups">list of zone text lookups</param>
+        /// <param name="chanLookups">list of channel text lookups</param>
+        /// <param name="txAudioCallback">callback for handling TX audio samples from the WebRTC connection</param>
+        /// <param name="txAudioSampleRate">sample rate the TX callback expects</param>
+        /// <param name="rtcFormatCallback">callback upon WebRTC format negotiation</param>
         public Radio(
             string name, string desc, bool rxOnly,
             IPAddress listenAddress, int listenPort,
             List<SoftkeyName> softkeys = null,
             List<TextLookup> zoneLookups = null,
             List<TextLookup> chanLookups = null,
-            Action<short[]> txAudioCallback = null, int txAudioSampleRate = 8000)
+            Action<short[]> txAudioCallback = null, int txAudioSampleRate = 8000,
+            Action<AudioFormat> rtcFormatCallback = null)
         {
             // Log Print
             Log.Logger.Information($"Creating new RC2 radio {name} ({desc}) listening on {listenAddress}:{listenPort}");
@@ -231,7 +240,7 @@ namespace rc2_core
             this.desc = desc;
 
             // Create backend server
-            server = new RC2Server(listenAddress, listenPort, this, txAudioCallback, txAudioSampleRate);
+            server = new RC2Server(listenAddress, listenPort, this, txAudioCallback, txAudioSampleRate, rtcFormatCallback);
 
             // Create status and assign name & description
             Status = new RadioStatus();
@@ -407,6 +416,9 @@ namespace rc2_core
             server.RxSendPCM16Samples(samples, samplerate);
         }
 
-
+        public void RxSendEncodedSamples(uint durationRtpUnits, byte[] encodedSamples)
+        {
+            server.RxSendEncodedSamples(durationRtpUnits, encodedSamples);
+        }
     }
 }
