@@ -260,6 +260,16 @@ namespace rc2_core
             // Save lookups
             if (zoneLookups != null) { ZoneLookups = zoneLookups; }
             if (chanLookups != null) { ChanLookups = chanLookups; }
+
+            Log.Logger.Debug("Loaded {zoneCount} zone text lookups", ZoneLookups.Count);
+            ZoneLookups.ForEach((lookup) => {
+                Log.Logger.Verbose("    {match} -> {replace}", lookup.Match, lookup.Replace);
+            });
+
+            Log.Logger.Debug("Loaded {chanCount} channel text lookups", ChanLookups.Count);
+            ChanLookups.ForEach((lookup) => {
+                Log.Logger.Verbose("    {match} -> {replace}", lookup.Match, lookup.Replace);
+            });
         }
 
         /// <summary>
@@ -307,9 +317,15 @@ namespace rc2_core
                         Status.ZoneName = lookup.Replace;
                         break;
                     }
+                    // Check Zone Text First (for dual-line displays like M3)
                     if (Status.ZoneName.Contains(lookup.Match))
                     {
-                        Log.Logger.Verbose("Found zone text {ZoneName} from {Match} in original text {Text}", lookup.Replace, lookup.Match, Status.ZoneName);
+                        Log.Logger.Verbose("Found zone text {ZoneName} from {Match} in zone text {Text}", lookup.Replace, lookup.Match, Status.ZoneName);
+                        Status.ZoneName = lookup.Replace;
+                    }
+                    else if (Status.ChannelName.Contains(lookup.Match))
+                    {
+                        Log.Logger.Verbose("Found zone text {ZoneName} from {Match} in channel text {Text}", lookup.Replace, lookup.Match, Status.ChannelName);
                         Status.ZoneName = lookup.Replace;
                     }
                 }
