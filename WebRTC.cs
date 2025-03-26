@@ -277,7 +277,10 @@ namespace rc2_core
                     Log.Logger.Debug("Negotiated TX audio format {AudioFormat} ({ClockRate}/{Chs})", TxFormat.FormatName, TxFormat.ClockRate, TxFormat.ChannelCount);
                 }
                 // Fire the callback
-                RTCFormatCallback(RxFormat);
+                if (RTCFormatCallback != null)
+                {
+                    RTCFormatCallback(RxFormat);
+                }
             };
 
             // Connection state change callback
