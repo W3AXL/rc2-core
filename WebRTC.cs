@@ -12,6 +12,7 @@ using NAudio;
 using NAudio.Wave;
 using NAudio.Utils;
 using NAudio.Wave.SampleProviders;
+using NAudio.Dsp;
 using Concentus;
 
 namespace rc2_core
@@ -64,6 +65,10 @@ namespace rc2_core
 
         // Callback for receiving audio from the peer connection
         private Action<short[]> TxCallback;
+
+        // Low pass filters for resampling
+        private BiQuadFilter rxResamplingLowPassFilter;
+        private BiQuadFilter txResamplingLowPassFilter;
 
         // Callback for when the audio formats have been negotiated for the peer connection
         public Action<AudioFormat> RTCFormatCallback;
@@ -135,11 +140,31 @@ namespace rc2_core
             }
 
             // Resample if needed
-            if (pcmSampleRate != RxFormat.ClockRate)
+            if (pcmSampleRate < RxFormat.ClockRate)
             {
                 short[] resampled = RxEncoder.Resample(pcm16Samples, (int)pcmSampleRate, RxFormat.ClockRate);
-                byte[] encodedSamples = RxEncoder.EncodeAudio(resampled, RxFormat);
+
+                // Create a low pass filter if we haven't already
+                if (rxResamplingLowPassFilter == null)
+                {
+                    rxResamplingLowPassFilter = BiQuadFilter.LowPassFilter(RxFormat.ClockRate, (float)(pcmSampleRate * 0.95 / 2.0), 4);
+                }
+
+                // Filter the resampled audio
+                short[] filtered = new short[resampled.Length];
+                for (int i = 0; i < resampled.Length; i++)
+                {
+                    float sample = (float)resampled[i] / (float)short.MaxValue;
+                    float flt = rxResamplingLowPassFilter.Transform(sample);
+                    filtered[i] = (short)(flt * short.MaxValue);
+                }
+
+                byte[] encodedSamples = RxEncoder.EncodeAudio(filtered, RxFormat);
                 this.RxAudioCallback((uint)encodedSamples.Length, encodedSamples);
+            }
+            else if (pcmSampleRate > RxFormat.ClockRate)
+            {
+                throw new ArgumentException("Resampling RX audio to lower sample rate not yet supported!");
             }
             else
             {
@@ -160,10 +185,30 @@ namespace rc2_core
             short[] pcm16Samples = TxEncoder.DecodeAudio(encodedSamples, TxFormat);
 
             // Resample if needed
-            if (txAudioSamplerate != TxFormat.ClockRate)
+            if (txAudioSamplerate < TxFormat.ClockRate)
             {
-                short[] resampled = TxEncoder.Resample(pcm16Samples, TxFormat.ClockRate, txAudioSamplerate);
+                // Create a low pass filter if we haven't already
+                if (txResamplingLowPassFilter == null)
+                {
+                    txResamplingLowPassFilter = BiQuadFilter.LowPassFilter(TxFormat.ClockRate, (float)(txAudioSamplerate * 0.95 / 2.0), 4);
+                }
+
+                // Filter the raw audio
+                short[] filtered = new short[pcm16Samples.Length];
+                for (int i = 0; i < pcm16Samples.Length; i++)
+                {
+                    float sample = (float)pcm16Samples[i] / (float)short.MaxValue;
+                    float flt = txResamplingLowPassFilter.Transform(sample);
+                    filtered[i] = (short)(flt * short.MaxValue);
+                }
+
+                short[] resampled = TxEncoder.Resample(filtered, TxFormat.ClockRate, txAudioSamplerate);
+
                 TxCallback(resampled);
+            }
+            else if (txAudioSamplerate > TxFormat.ClockRate)
+            {
+                throw new ArgumentException("Resampling TX samples to higher sample rate not yet supported!");
             }
             else
             {
