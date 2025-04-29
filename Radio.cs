@@ -39,6 +39,7 @@ namespace rc2_core
         Idle,
         Transmitting,
         Receiving,
+        Encrypted,
         Error,
         Disconnecting
     }
@@ -157,6 +158,7 @@ namespace rc2_core
         public bool Monitor { get; set; } = false;
         public bool Direct {get; set;} = false;
         public bool Error { get; set; } = false;
+        public bool Secure { get; set; } = false;
         public string ErrorMsg { get; set; } = "";
 
         /// <summary>
