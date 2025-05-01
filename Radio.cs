@@ -150,6 +150,7 @@ namespace rc2_core
         public string Description { get; set; } = "";
         public string ZoneName { get; set; } = "";
         public string ChannelName { get; set; } = "";
+        public string CallerId { get; set; } = "";
         public RadioState State { get; set; } = RadioState.Disconnected;
         public ScanState ScanState { get; set; } = ScanState.NotScanning;
         public PriorityState PriorityState {get; set;} = PriorityState.NoPriority;
