@@ -18,7 +18,7 @@ namespace rc2_core
     {
         private WebSocketServer wss {  get; set; }
 
-        private WebRTC rtc { get; set; }
+        private WebRTCPeer rtcPeer { get; set; }
 
         private Radio radio { get; set; }
 
@@ -27,14 +27,14 @@ namespace rc2_core
         {
             get
             {
-                return rtc.RecTxInProgress;
+                return rtcPeer.RecTxInProgress;
             }
         }
         public bool RxRecording
         {
             get
             {
-                return rtc.RecRxInProgress;
+                return rtcPeer.RecRxInProgress;
             }
         }
 
@@ -50,14 +50,14 @@ namespace rc2_core
         public RC2Server(IPAddress address, int port, Radio _radio, Action<short[]> txAudioCallback, int txAudioSampleRate, Action<AudioFormat> rtcFormatCallback = null)
         {
             wss = new WebSocketServer(address, port);
-            rtc = new WebRTC(txAudioCallback, txAudioSampleRate);
+            rtcPeer = new WebRTCPeer(txAudioCallback, txAudioSampleRate);
             radio = _radio;
             // Bind status callback
             radio.StatusCallback += SendRadioStatus;
             // Bind format callback
             if (rtcFormatCallback != null)
             {
-                rtc.RTCFormatCallback += rtcFormatCallback;
+                rtcPeer.RTCFormatCallback += rtcFormatCallback;
             }
         }
 
@@ -65,7 +65,7 @@ namespace rc2_core
         {
             Serilog.Log.Logger.Information($"Starting websocket server on {wss.Address}:{wss.Port}");
             // Set up the WebRTC handler
-            wss.AddWebSocketService<WebRTCWebSocketPeer>("/rtc", (peer) => peer.CreatePeerConnection = rtc.CreatePeerConnection);
+            wss.AddWebSocketService<WebRTCWebSocketPeer>("/rtc", (peer) => peer.CreatePeerConnection = rtcPeer.CreatePeerConnection);
             // Set up the regular message handler
             wss.AddWebSocketService<ConsoleBehavior>("/", () => new ConsoleBehavior(this, this.radio));
             // Keeps the thing alive
@@ -76,20 +76,20 @@ namespace rc2_core
 
         public void StopRTC(string reason)
         {
-            rtc.Stop(reason);
+            rtcPeer.Stop(reason);
         }
 
         public void Stop(string reason)
         {
-            rtc.Stop(reason);
+            rtcPeer.Stop(reason);
             wss.Stop();
         }
 
         public void SendRadioStatus()
         {
             string statusJson = radio.Status.Encode();
-            Log.Debug("Sending radio status via websocket");
-            Log.Verbose(statusJson);
+            Serilog.Log.Logger.Debug("Sending radio status via websocket");
+            Serilog.Log.Logger.Verbose(statusJson);
             SendClientMessage("{\"status\": " + statusJson + " }");
         }
 
@@ -110,28 +110,28 @@ namespace rc2_core
 
         public void RecordTx(string filename)
         {
-            rtc.RecStartTx(filename);
+            rtcPeer.RecStartTx(filename);
         }
 
         public void RecordRx(string filename)
         {
-            rtc.RecStartRx(filename);
+            rtcPeer.RecStartRx(filename);
         }
 
         public void RecordStop()
         {
-            rtc.RecStop();
+            rtcPeer.RecStop();
         }
 
         // WebRTC audio functions
         public void RxSendPCM16Samples(short[] samples, uint samplerate)
         {
-            rtc.RxAudioCallback16(samples, samplerate);
+            rtcPeer.RxAudioCallback16(samples, samplerate);
         }
 
         public void RxSendEncodedSamples(uint durationRtpUnits, byte[] encodedSamples)
         {
-            rtc.RxAudioCallback(durationRtpUnits, encodedSamples);
+            rtcPeer.RxAudioCallback(durationRtpUnits, encodedSamples);
         }
     }
 
@@ -151,7 +151,7 @@ namespace rc2_core
 
             if (msg == null) { return; }
 
-            Serilog.Log.Verbose($"Got client message from websocket: {msg}");
+            Serilog.Log.Logger.Verbose($"Got client message from websocket: {msg}");
             dynamic jsonObj = JsonConvert.DeserializeObject(msg);
 
             if (jsonObj == null)
@@ -217,7 +217,7 @@ namespace rc2_core
                 // Reset
                 else if (jsonObj.radio.command == "reset")
                 {
-                    Serilog.Log.Information("Resetting and restarting radio interface");
+                    Serilog.Log.Logger.Information("Resetting and restarting radio interface");
                     // Stop
                     radio.Stop();
                     // Restart with reset
@@ -228,13 +228,13 @@ namespace rc2_core
 
         protected override void OnClose(CloseEventArgs e)
         {
-            Serilog.Log.Warning("Websocket connection closed: {args}", e.Reason);
+            Serilog.Log.Logger.Warning("Websocket connection closed: {args}", e.Reason);
             server.StopRTC("Websocket closed");
         }
 
         protected override void OnError(WebSocketSharp.ErrorEventArgs e)
         {
-            Serilog.Log.Error("Websocket encountered an error! {error}", e.Message);
+            Serilog.Log.Logger.Error("Websocket encountered an error! {error}", e.Message);
         }
     }
 }
