@@ -18,23 +18,37 @@ namespace rc2_core
     {
         private WebSocketServer wss {  get; set; }
 
-        private WebRTCPeer rtcPeer { get; set; }
+        private int txAudioSampleRate = 8000;
 
-        private Radio radio { get; set; }
+        /// <summary>
+        /// Called when new TX samples are available from the WebRTC connection
+        /// </summary>
+        public Action<short[]> TxAudioCallback;
+
+        /// <summary>
+        /// Called when WebRTC formats are negotiated
+        /// </summary>
+        public Action<AudioFormat> OnWebRTCFormats;
+
+        // Internal RC2 radio object
+        private Radio radio;
+
+        // Internal WebRTCPeer object
+        private WebRTCPeer rtcPeer;
 
         // Flags for TX/RX recording
         public bool TxRecording
         {
             get
             {
-                return rtcPeer.RecTxInProgress;
+                return rtcPeer?.RecTxInProgress ?? false;
             }
         }
         public bool RxRecording
         {
             get
             {
-                return rtcPeer.RecRxInProgress;
+                return rtcPeer?.RecRxInProgress ?? false;
             }
         }
 
@@ -47,25 +61,27 @@ namespace rc2_core
         /// <param name="txAudioCallback">callback to handle TX audio samples from WebRTC connection</param>
         /// <param name="txAudioSampleRate">sample rate the TX audio callback is expecting</param>
         /// <param name="rtcFormatCallback">callback when WebRTC audio formats are negotiated</param>
-        public RC2Server(IPAddress address, int port, Radio _radio, Action<short[]> txAudioCallback, int txAudioSampleRate, Action<AudioFormat> rtcFormatCallback = null)
+        public RC2Server(IPAddress address, int port, Radio _radio, int txAudioSampleRate)
         {
             wss = new WebSocketServer(address, port);
-            rtcPeer = new WebRTCPeer(txAudioCallback, txAudioSampleRate);
             radio = _radio;
+            this.txAudioSampleRate = txAudioSampleRate;
             // Bind status callback
             radio.StatusCallback += SendRadioStatus;
-            // Bind format callback
-            if (rtcFormatCallback != null)
-            {
-                rtcPeer.RTCFormatCallback += rtcFormatCallback;
-            }
         }
 
         public void Start()
         {
             Serilog.Log.Logger.Information($"Starting websocket server on {wss.Address}:{wss.Port}");
             // Set up the WebRTC handler
-            wss.AddWebSocketService<WebRTCWebSocketPeer>("/rtc", (peer) => peer.CreatePeerConnection = rtcPeer.CreatePeerConnection);
+            wss.AddWebSocketService<WebRTCPeer>("/rtc", (peer) =>
+            {
+                peer.TxCallback += TxAudioCallback;
+                peer.TxAudioSamplerate = txAudioSampleRate;
+                peer.RTCFormatCallback += OnWebRTCFormats;
+
+                rtcPeer = peer;
+            });
             // Set up the regular message handler
             wss.AddWebSocketService<ConsoleBehavior>("/", () => new ConsoleBehavior(this, this.radio));
             // Keeps the thing alive
@@ -76,12 +92,12 @@ namespace rc2_core
 
         public void StopRTC(string reason)
         {
-            rtcPeer.Stop(reason);
+            rtcPeer?.Stop(reason);
         }
 
         public void Stop(string reason)
         {
-            rtcPeer.Stop(reason);
+            rtcPeer?.Stop(reason);
             wss.Stop();
         }
 

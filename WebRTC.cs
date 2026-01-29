@@ -1,26 +1,27 @@
-﻿using Serilog;
-using SIPSorcery.Net;
+﻿using Concentus;
+using Microsoft.Extensions.Logging;
+using NAudio;
+using NAudio.Dsp;
+using NAudio.Utils;
+using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
+using Serilog;
+using Serilog.Core;
+using Serilog.Events;
 using SIPSorcery.Media;
+using SIPSorcery.Net;
+using SIPSorceryMedia.Abstractions;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using SIPSorceryMedia.Abstractions;
 using System.Net;
-using NAudio;
-using NAudio.Wave;
-using NAudio.Utils;
-using NAudio.Wave.SampleProviders;
-using NAudio.Dsp;
-using Concentus;
-using System.Timers;
-using Microsoft.Extensions.Logging;
-using Serilog.Core;
-using Serilog.Events;
-using WebSocketSharp;
-using System.Text.Json.Serialization;
+using System.Runtime.Intrinsics.Arm;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Threading.Tasks;
+using System.Timers;
+using WebSocketSharp;
 
 namespace rc2_core
 {
@@ -69,7 +70,7 @@ namespace rc2_core
         private AudioEncoder RecTxEncoder;
 
         // TX audio output samplerate
-        private int txAudioSamplerate;
+        public int TxAudioSamplerate;
 
         // Watchdog timers for missing TX/RX samples
         private System.Timers.Timer rxSampleTimer = new System.Timers.Timer(500);
@@ -98,6 +99,11 @@ namespace rc2_core
         private uint syncSource;
         private SrtpFailureSink srtpFailureSink;
 
+        // WebRTC perfect negotiation flags
+        private bool polite = true;
+        private bool makingOffer = false;
+        private bool ignoreOffer = false;
+
         // Flag whether our radio is RX only
         public bool RxOnly {get; set;} = false;
 
@@ -108,7 +114,7 @@ namespace rc2_core
         public event EventHandler OnWebRTCClose;
 
         // Callback for receiving audio from the peer connection
-        private Action<short[]> TxCallback;
+        public Action<short[]> TxCallback;
 
         // Low pass filters for resampling
         private BiQuadFilter rxResamplingLowPassFilter;
@@ -124,20 +130,14 @@ namespace rc2_core
         /// </summary>
         public class SignalingMessage
         {
-            public enum MessageType
-            {
-                OFFER,
-                ANSWER,
-                CANDIDATE
-            }
-            public MessageType Type { get; set; }
-            public string SDP { get; set; }
-            public string Candidate { get; set; }
-            public string SDPMid { get; set; }
-            public ushort? SDPMLineIndex { get; set; }
+            public string type { get; set; }
+            public string sdp { get; set; }
+            public string candidate { get; set; }
+            public string sdpMid { get; set; }
+            public ushort? sdpMLineIndex { get; set; }
         }
 
-        public WebRTCPeer(Action<short[]> txCallback, int txSampleRate)
+        public WebRTCPeer()
         {
             // Create RX encoders
             RxEncoder = new AudioEncoder();
@@ -154,10 +154,10 @@ namespace rc2_core
             {
                 TxEncoder = new AudioEncoder();
                 RecTxEncoder = new AudioEncoder();
-                // Bind tx audio callback
-                TxCallback = txCallback;
-                txAudioSamplerate = txSampleRate;
             }
+
+            // Default samplerate
+            TxAudioSamplerate = 8000;
 
             // Enable hook for SRTP failure monitoring
             srtpFailureSink = new SrtpFailureSink();
@@ -171,69 +171,28 @@ namespace rc2_core
                 builder.AddSerilog(srtpLogger);
             });
             SIPSorcery.LogFactory.Set(factory);
+
+            // Logging
+            Serilog.Log.Logger.Debug("Created new WebRTCPeer");
         }
 
-        protected override async void OnOpen()
+        protected override void OnOpen()
         {
-            await initPeerConnection();
-        }
-
-        private async Task initPeerConnection()
-        {
-            pc = await CreatePeerConnection();
+            Serilog.Log.Logger.Debug("WebRTC websocket connection opened");
+            createPeerConnection();
             connectEventHandlers();
+            configureAudio();
         }
 
-        protected override async void OnMessage(MessageEventArgs e)
+        /// <summary>
+        /// Create a new peer connection to a WebRTC endpoint and configure the audio tracks
+        /// </summary>
+        private void createPeerConnection()
         {
-            SignalingMessage? msg = JsonSerializer.Deserialize<SignalingMessage>(e.Data);
+            Serilog.Log.Logger.Debug("Creating WebRTC peer connection");
 
-            if (msg == null)
-                throw new InvalidDataException($"Unable to deserialize JSON: {e.Data}");
-
-            switch (msg.Type)
-            {
-                case SignalingMessage.MessageType.OFFER:
-                    await handleOffer(msg.SDP);
-                    break;
-                case SignalingMessage.MessageType.ANSWER:
-                    pc.setRemoteDescription(new RTCSessionDescriptionInit 
-                    { 
-                        type = RTCSdpType.answer,
-                        sdp = msg.SDP 
-                    });
-                    break;
-                case SignalingMessage.MessageType.CANDIDATE:
-                    pc.addIceCandidate(new RTCIceCandidateInit
-                    {
-                        candidate = msg.Candidate,
-                        sdpMid = msg.SDPMid,
-                        sdpMLineIndex = msg.SDPMLineIndex ?? 0
-                    });
-                    break;
-            }
-        }
-
-        private async Task handleOffer(string sdp)
-        {
-            // Set the remote description
-            pc.setRemoteDescription(
-                new RTCSessionDescriptionInit
-                {
-                    type = RTCSdpType.offer,
-                    sdp = sdp
-                }
-            );
-            // Create an answer and send it
-            RTCSessionDescriptionInit answer = pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            Send(JsonSerializer.Serialize(
-                new
-                {
-                    type = "answer",
-                    sdp = answer.sdp
-                }
-            ));
+            // Create new peer connection
+            pc = new RTCPeerConnection(null);
         }
 
         /// <summary>
@@ -241,11 +200,32 @@ namespace rc2_core
         /// </summary>
         private void connectEventHandlers()
         {
+            Serilog.Log.Logger.Debug("Binding event handlers for WebRTC peer connection");
+
+            // Negotiation needed handler
+            pc.onnegotiationneeded += async () => { await negotiationNeeded(); };
+
             // Audio format negotiation callback
             pc.OnAudioFormatsNegotiated += audioFormatsNegotiated;
 
             // Connection state change callback
             pc.onconnectionstatechange += connectionStateChange;
+
+            // ICE candidate handler for local ICE candidates
+            pc.onicecandidate += (candidate) =>
+            {
+                if (candidate != null)
+                {
+                    Serilog.Log.Logger.Verbose("Got new ICE candidate: {candidate}, sending to console", candidate);
+                    Send(JsonSerializer.Serialize(new
+                    {
+                        type = "candidate",
+                        candidate = $"candidate:{candidate.candidate}",
+                        sdpMid = candidate.sdpMid,
+                        sdpMLineIndex = candidate.sdpMLineIndex
+                    }));
+                }
+            };
 
             // Debug Stuff
             pc.OnReceiveReport += (re, media, rr) =>
@@ -281,7 +261,7 @@ namespace rc2_core
             };
 
             // Detailed logging for debugging the hangup
-            pc.GetRtpChannel().OnRTPDataReceived += (port, ep, buffer) =>
+            /*pc.GetRtpChannel().OnRTPDataReceived += (port, ep, buffer) =>
             {
                 if (buffer.Length >= 12)
                 {
@@ -292,23 +272,80 @@ namespace rc2_core
 
                     Serilog.Log.Logger.Debug("Raw RTP: SSRC={SSRC} Seq={Seq} TS={TS}", ssrc, seq, ts);
                 }
-            };
+            };*/
 
             // RTP Samples callback
             pc.OnRtpPacketReceived += rtpPacketHandler;
         }
 
         /// <summary>
-        /// Create a new peer connection to a WebRTC endpoint and configure the audio tracks
+        /// Handler fired when WebRTC audio negotiation is needed
         /// </summary>
-        /// <returns></returns>
-        /// <exception cref="ArgumentException"></exception>
-        public Task<RTCPeerConnection> CreatePeerConnection()
+        private async Task negotiationNeeded()
         {
-            Serilog.Log.Logger.Debug("New client connected to RTC endpoint, creating peer connection");
-            
-            // Create new peer connection
-            pc = new RTCPeerConnection(null);
+            try
+            {
+                // Set the flag
+                makingOffer = true;
+                // Create and set a new offer
+                RTCSessionDescriptionInit offer = pc.createOffer();
+                await pc.setLocalDescription(offer);
+                // Send the offer
+                Send(JsonSerializer.Serialize(new
+                {
+                    type = "offer",
+                    sdp = offer.sdp,
+                }));
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Logger.Error(ex, "Caught exception while creating and sending local offer");
+            }
+            finally
+            {
+                makingOffer = false;
+            }
+        }
+
+        /// <summary>
+        /// Handler for RTC connection state chagne
+        /// </summary>
+        /// <param name="state">the new connection state</param>
+        private void connectionStateChange(RTCPeerConnectionState state)
+        {
+            Serilog.Log.Logger.Information("Peer connection state change to {PCState}.", state);
+
+            if (state == RTCPeerConnectionState.failed)
+            {
+                Serilog.Log.Logger.Error("Peer connection failed");
+                Serilog.Log.Logger.Debug("Closing peer connection");
+                pc.Close("Connection failed");
+            }
+            else if (state == RTCPeerConnectionState.closed)
+            {
+                Serilog.Log.Logger.Debug("WebRTC connection closed");
+                if (OnWebRTCClose != null)
+                {
+                    OnWebRTCClose(this, EventArgs.Empty);
+                }
+            }
+            else if (state == RTCPeerConnectionState.connected)
+            {
+                Serilog.Log.Logger.Debug("WebRTC connection opened");
+                if (OnWebRTCConnect != null)
+                {
+                    OnWebRTCConnect(this, EventArgs.Empty);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Configure audio codecs and add the new track to the peer connection
+        /// </summary>
+        /// <exception cref="ArgumentException"></exception>
+        private void configureAudio()
+        {
+            Serilog.Log.Logger.Debug("Configuring local WebRTC media tracks");
 
             // Debug print of supported audio formats
             Serilog.Log.Logger.Verbose("Client supported formats:");
@@ -333,15 +370,154 @@ namespace rc2_core
                 audioTrack = new MediaStreamTrack(fmt, MediaStreamStatusEnum.SendRecv);
                 pc.addTrack(audioTrack);
                 Serilog.Log.Logger.Debug("Added send/recv audio track to peer connection");
-            } 
+            }
             else
             {
                 audioTrack = new MediaStreamTrack(fmt, MediaStreamStatusEnum.SendOnly);
                 pc.addTrack(audioTrack);
                 Serilog.Log.Logger.Debug("Added send-only audio track to peer connection");
             }
+        }
 
-            return Task.FromResult(pc);
+        /// <summary>
+        /// Message handler for messages received from the WebRTC websocket channel
+        /// </summary>
+        /// <param name="e"></param>
+        /// <exception cref="InvalidDataException"></exception>
+        protected override async void OnMessage(MessageEventArgs e)
+        {
+            try
+            {
+                Serilog.Log.Logger.Verbose("Got WebRTC message: {data}", e.Data);
+
+                SignalingMessage? msg = JsonSerializer.Deserialize<SignalingMessage>(e.Data);
+
+                if (msg == null)
+                    throw new InvalidDataException($"Unable to deserialize JSON: {e.Data}");
+
+                if (msg.type != null)
+                {
+                    switch (msg.type)
+                    {
+                        case "offer":
+                            await handleRemoteOffer(msg.sdp);
+                            break;
+                        case "answer":
+                            handleRemoteAnswer(msg.sdp);
+                            break;
+                        default:
+                            Serilog.Log.Logger.Warning("Unknown signaling message type: {type}", msg.type);
+                            break;
+                    }
+                } else if (msg.candidate != null)
+                {
+                    handleRemoteCandidate(msg);
+                }
+            }
+            catch (JsonException ex)
+            {
+                Serilog.Log.Logger.Error(ex, "Got error while deserializing JSON data!");
+                Serilog.Log.Logger.Error("Data: {data:l}", e.Data);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Handler for a received remote SDP offer
+        /// </summary>
+        /// <param name="sdp">the SDP string</param>
+        /// <returns></returns>
+        private async Task handleRemoteOffer(string sdp)
+        {
+            Serilog.Log.Logger.Verbose("Received remote SDP offer: {sdp:l}", sdp);
+
+            // Create an offer object from the SDP received
+            RTCSessionDescriptionInit offer = new RTCSessionDescriptionInit
+            {
+                type = RTCSdpType.offer,
+                sdp = sdp
+            };
+
+            // Determine if there is an offer collision and if we should ignore it
+            bool collision = (pc.signalingState != RTCSignalingState.stable && makingOffer);
+            ignoreOffer = !polite && collision;
+
+            // Ignore the offer if we're impolite (normally not used)
+            if (ignoreOffer)
+            {
+                Serilog.Log.Logger.Warning("Ignoring remote offer due to collision (impolite side)");
+                return;
+            }
+
+            // If we're polite (default), rollback our local description
+            if (collision)
+            {
+                Serilog.Log.Logger.Warning("Offer collision detected, rolling back (polite side)");
+                await pc.setLocalDescription(new RTCSessionDescriptionInit
+                {
+                    type = RTCSdpType.rollback
+                });
+            }
+
+            // Set the remote description from the offer
+            pc.setRemoteDescription(offer);
+
+            // Create a session description answer
+            RTCSessionDescriptionInit answer = pc.createAnswer();
+            await pc.setLocalDescription(answer);
+
+            // Send the answer
+            Send(JsonSerializer.Serialize(new
+            {
+                type = "answer",
+                sdp = answer.sdp
+            }));
+        }
+
+        /// <summary>
+        /// Handler for a received remote SDP answer
+        /// </summary>
+        /// <param name="sdp"></param>
+        /// <returns></returns>
+        private void handleRemoteAnswer(string sdp)
+        {
+            Serilog.Log.Logger.Verbose("Received remote SDP answer: {sdp:l}", sdp);
+
+            // Create a new answer object from the received SDP
+            RTCSessionDescriptionInit answer = new RTCSessionDescriptionInit
+            {
+                type = RTCSdpType.answer,
+                sdp = sdp
+            };
+            // Set the remote description based on this answer
+            pc.setRemoteDescription(answer);
+        }
+
+        /// <summary>
+        /// Handler for a received remote ICE candidate
+        /// </summary>
+        /// <param name="msg"></param>
+        private void handleRemoteCandidate(SignalingMessage msg)
+        {
+            // Ensure we got a valid candidate
+            if (string.IsNullOrWhiteSpace(msg.candidate))
+            {
+                Serilog.Log.Logger.Warning("Received empty remote ICE candidate!");
+                return;
+            }
+
+            // Create a new candidate object
+            RTCIceCandidateInit candidate = new RTCIceCandidateInit
+            {
+                candidate = msg.candidate,
+                sdpMid = msg.sdpMid,
+                sdpMLineIndex = msg.sdpMLineIndex ?? 0
+            };
+
+            // Add it to the peer connection
+            pc.addIceCandidate(candidate);
+
+            Serilog.Log.Logger.Debug("Added new remote ICE candidate to WebRTC peer connection");
         }
 
         /// <summary>
@@ -355,58 +531,36 @@ namespace rc2_core
             {
                 Serilog.Log.Logger.Warning("Restarting WebRTC peer connection: {reason:l}", reason);
 
-                pc?.Close(reason);
-                pc?.Dispose();
+                try
+                {
+                    pc?.Close(reason);
+                    pc?.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    Serilog.Log.Logger.Error(ex, "Caught exception while closing stale WebRTC connection");
+                }
 
+                // Reset negotiation flags
+                makingOffer = false;
+                ignoreOffer = false;
+
+                // Reset the failure detection sink
                 srtpFailureSink.Reset();
 
-                await initPeerConnection();
+                // Create a new peer connection
+                pc = new RTCPeerConnection(null);
 
-                // Send a new offer
-                RTCSessionDescriptionInit offer = pc.createOffer();
-                await pc.setLocalDescription(offer);
-                Send(JsonSerializer.Serialize(new
-                {
-                    type = "offer",
-                    sdp = offer.sdp
-                }));
+                // Reconnect everything
+                connectEventHandlers();
+                configureAudio();
+
+                // At this point the other side of the connection should trigger the renegotiation
             }
             catch (Exception ex)
             {
-                Serilog.Log.Logger.Error(ex, "Error restarting peer connection");
+                Serilog.Log.Logger.Error(ex, "Caught exception while restarting WebRTC peer connection");
                 throw;
-            }
-        }
-
-        /// <summary>
-        /// Handler for RTC connection state chagne
-        /// </summary>
-        /// <param name="state">the new connection state</param>
-        private async void connectionStateChange(RTCPeerConnectionState state)
-        {
-            Serilog.Log.Logger.Information("Peer connection state change to {PCState}.", state);
-
-            if (state == RTCPeerConnectionState.failed)
-            {
-                Serilog.Log.Logger.Error("Peer connection failed");
-                Serilog.Log.Logger.Debug("Closing peer connection");
-                pc.Close("Connection failed");
-            }
-            else if (state == RTCPeerConnectionState.closed)
-            {
-                Serilog.Log.Logger.Debug("WebRTC connection closed");
-                if (OnClose != null)
-                {
-                    OnWebRTCConnect(this, EventArgs.Empty);
-                }
-            }
-            else if (state == RTCPeerConnectionState.connected)
-            {
-                Serilog.Log.Logger.Debug("WebRTC connection opened");
-                if (OnWebRTCConnect != null)
-                {
-                    OnWebRTCConnect(this, EventArgs.Empty);
-                }
             }
         }
 

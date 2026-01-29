@@ -187,12 +187,12 @@ namespace rc2_core
             short[] pcm16Samples = TxEncoder.DecodeAudio(encodedSamples, audioFmt);
 
             // Resample if needed
-            if (txAudioSamplerate < audioFmt.ClockRate)
+            if (TxAudioSamplerate < audioFmt.ClockRate)
             {
                 // Create a low pass filter if we haven't already
                 if (txResamplingLowPassFilter == null)
                 {
-                    txResamplingLowPassFilter = BiQuadFilter.LowPassFilter(audioFmt.ClockRate, (float)(txAudioSamplerate * 0.95 / 2.0), 4);
+                    txResamplingLowPassFilter = BiQuadFilter.LowPassFilter(audioFmt.ClockRate, (float)(TxAudioSamplerate * 0.95 / 2.0), 4);
                 }
 
                 // Filter the raw audio
@@ -204,11 +204,11 @@ namespace rc2_core
                     filtered[i] = (short)(flt * short.MaxValue);
                 }
 
-                short[] resampled = TxEncoder.Resample(filtered, audioFmt.ClockRate, txAudioSamplerate);
+                short[] resampled = TxEncoder.Resample(filtered, audioFmt.ClockRate, TxAudioSamplerate);
 
                 TxCallback(resampled);
             }
-            else if (txAudioSamplerate > audioFmt.ClockRate)
+            else if (TxAudioSamplerate > audioFmt.ClockRate)
             {
                 throw new ArgumentException("Resampling TX samples to higher sample rate not yet supported!");
             }
