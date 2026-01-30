@@ -1,38 +1,89 @@
-﻿using Serilog;
-using SIPSorcery.Net;
+﻿using Concentus;
+using Microsoft.Extensions.Logging;
+using NAudio;
+using NAudio.Dsp;
+using NAudio.Utils;
+using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
+using Serilog;
+using Serilog.Core;
+using Serilog.Events;
 using SIPSorcery.Media;
+using SIPSorcery.Net;
+using SIPSorceryMedia.Abstractions;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using SIPSorceryMedia.Abstractions;
 using System.Net;
-using NAudio;
-using NAudio.Wave;
-using NAudio.Utils;
-using NAudio.Wave.SampleProviders;
-using NAudio.Dsp;
-using Concentus;
+using System.Runtime.Intrinsics.Arm;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Threading.Tasks;
+using System.Timers;
+using WebSocketSharp;
 
 namespace rc2_core
 {
-    public class WebRTC
+    /// <summary>
+    /// Logging sink used to detect errors/exceptions within SipSorcery and restart the WebRTC peer connection
+    /// </summary>
+    public class SrtpFailureSink : ILogEventSink
+    {
+        private int failCount = 0;
+        private bool tracking = true;
+
+        private const int failThresh = 3;
+
+        public event Action<string> OnFailure;
+        
+        public void Emit(LogEvent ev)
+        {
+            // Ignore if we're not tracking
+            if (!tracking) { return; }
+
+            // Check if we had an SRTP failure
+            if (ev.MessageTemplate.Text.Contains("SRTP unprotect failed"))
+            {
+                failCount++;
+            }
+
+            // If we exceeded the threshold, fire the handler and stop tracking
+            if (failCount > failThresh)
+            {
+                tracking = false;
+                OnFailure?.Invoke("SRTP failures exceeded threshold");
+            }
+        }
+
+        /// <summary>
+        /// Reset the failure counters
+        /// </summary>
+        public void Reset()
+        {
+            failCount = 0;
+            tracking = true;
+        }
+    }
+
+    public partial class WebRTCPeer : WebSocketSharp.Server.WebSocketBehavior
     {
         // Objects for RX audio processing
         private AudioEncoder RxEncoder;
-        private AudioFormat RxFormat = AudioFormat.Empty;
         
         // Objects for TX audio processing
         public AudioEncoder TxEncoder;
-        private AudioFormat TxFormat = AudioFormat.Empty;
 
         // We make separate encoders for recording since some codecs can be time-variant
         public AudioEncoder RecRxEncoder;
         private AudioEncoder RecTxEncoder;
 
         // TX audio output samplerate
-        private int txAudioSamplerate;
+        public int TxAudioSamplerate;
+
+        // Watchdog timers for missing TX/RX samples
+        private System.Timers.Timer rxSampleTimer = new System.Timers.Timer(500);
+        private System.Timers.Timer txSampleTimer = new System.Timers.Timer(500);
 
         // Objects for TX/RX audio recording
         public bool Record = false;          // Whether or not recording to audio files is enabled
@@ -49,326 +100,492 @@ namespace rc2_core
         private WaveFileWriter recTxWriter;
         private WaveFileWriter recRxWriter;
 
-        // WebRTC variables
-        private MediaStreamTrack RtcTrack;
+        // Common WebRTC variables
         private RTCPeerConnection pc;
         public const string Codec = "G722";
+        private AudioFormat audioFmt = AudioFormat.Empty;
+        private MediaStreamTrack audioTrack;
+        private uint syncSource;
+        private SrtpFailureSink srtpFailureSink;
+
+        // WebRTC perfect negotiation flags
+        private bool polite = true;
+        private bool makingOffer = false;
+        private bool ignoreOffer = false;
 
         // Flag whether our radio is RX only
         public bool RxOnly {get; set;} = false;
 
         // Event for when the WebRTC connection connects
-        public event EventHandler OnConnect;
+        public event EventHandler OnWebRTCConnect;
 
         // Event for when the WebRTC connection closes
-        public event EventHandler OnClose;
+        public event EventHandler OnWebRTCClose;
 
         // Callback for receiving audio from the peer connection
-        private Action<short[]> TxCallback;
+        public Action<short[]> TxCallback;
 
         // Low pass filters for resampling
         private BiQuadFilter rxResamplingLowPassFilter;
         private BiQuadFilter txResamplingLowPassFilter;
 
-        // Callback for when the audio formats have been negotiated for the peer connection
+        /// <summary>
+        /// Callback for when the audio formats have been negotiated for the peer connection
+        /// </summary>
         public Action<AudioFormat> RTCFormatCallback;
 
-        public WebRTC(Action<short[]> txCallback, int txSampleRate)
+        /// <summary>
+        /// Class to hold a WebRTC signaling message received over a websocket connection
+        /// </summary>
+        public class SignalingMessage
+        {
+            public string type { get; set; }
+            public string sdp { get; set; }
+            public string candidate { get; set; }
+            public string sdpMid { get; set; }
+            public ushort? sdpMLineIndex { get; set; }
+        }
+
+        public WebRTCPeer()
         {
             // Create RX encoders
             RxEncoder = new AudioEncoder();
             RecRxEncoder = new AudioEncoder();
+
+            // Setup sample watchdogs (stopped for now, they get started when the first samples start flowing)
+            txSampleTimer.Elapsed += missingTxSampleCallback;
+            txSampleTimer.Enabled = false;
+            rxSampleTimer.Elapsed += missingRxSampleCallback;
+            rxSampleTimer.Enabled = false;
 
             // Create TX encoders if we aren't RX only
             if (!RxOnly)
             {
                 TxEncoder = new AudioEncoder();
                 RecTxEncoder = new AudioEncoder();
-                // Bind tx audio callback
-                TxCallback = txCallback;
-                txAudioSamplerate = txSampleRate;
             }
+
+            // Default samplerate
+            TxAudioSamplerate = 8000;
+
+            // Enable hook for SRTP failure monitoring
+            srtpFailureSink = new SrtpFailureSink();
+            srtpFailureSink.OnFailure += (reason) => RestartPeerConnection(reason);
+            Serilog.Core.Logger srtpLogger = new LoggerConfiguration().WriteTo.Sink(srtpFailureSink).CreateLogger();
+
+            // Enable SipSorcery Logging
+            Microsoft.Extensions.Logging.ILoggerFactory factory = LoggerFactory.Create(builder =>
+            {
+                builder.AddSerilog(Serilog.Log.Logger);
+                builder.AddSerilog(srtpLogger);
+            });
+            SIPSorcery.LogFactory.Set(factory);
+
+            // Logging
+            Serilog.Log.Logger.Debug("Created new WebRTCPeer");
         }
 
-        /// <summary>
-        /// Callback used to send pre-encoded audio samples to the peer connection
-        /// </summary>
-        /// <param name="durationRtpUnits"></param>
-        /// <param name="encodedSamples"></param>
-        public void RxAudioCallback(uint durationRtpUnits, byte[] encodedSamples)
+        protected override void OnOpen()
         {
-            // If we don't have a peer connection, return
-            if (pc == null || RxFormat.RtpClockRate == 0)
-            {
-                //Log.Logger.Debug($"Ignoring RX samples, WebRTC peer not connected");
-                return;
-            }
-            
-            // Send audio
-            pc.SendAudio(durationRtpUnits, encodedSamples);
-
-            //Log.Logger.Debug($"Sent {encodedSamples.Length} ({durationRtpUnits * 1000 / RxFormat.RtpClockRate} ms) {RxFormat.Codec.ToString()} samples to WebRTC peer");
-            
-            // Record audio if enabled
-            if (Record && recRxWriter != null)
-            {
-                // Decode samples to pcm
-                short[] pcmSamples = RecRxEncoder.DecodeAudio(encodedSamples, RxFormat);
-                // Convert to float s16
-                float[] s16Samples = new float[pcmSamples.Length];
-                for (int n = 0; n < pcmSamples.Length; n++)
-                {
-                    s16Samples[n] = pcmSamples[n] / 32768f * recRxGain;
-                }
-                // Add to buffer
-                recRxWriter.WriteSamples(s16Samples, 0, s16Samples.Length);
-            }
-        }
-
-        /// <summary>
-        /// Callback used to send PCM16 samples to the peer connection
-        /// </summary>
-        /// <param name="durationRtpUnits"></param>
-        /// <param name="pcm16Samples"></param>
-        public void RxAudioCallback16(short[] pcm16Samples, uint pcmSampleRate)
-        {
-            // If we don't have a peer connection, return
-            if (pc == null || RxFormat.RtpClockRate == 0)
-            {
-                //Log.Logger.Debug($"Ignoring RX samples, WebRTC peer not connected");
-                return;
-            }
-
-            // Resample if needed
-            if (pcmSampleRate < RxFormat.ClockRate)
-            {
-                short[] resampled = RxEncoder.Resample(pcm16Samples, (int)pcmSampleRate, RxFormat.ClockRate);
-
-                // Create a low pass filter if we haven't already
-                if (rxResamplingLowPassFilter == null)
-                {
-                    rxResamplingLowPassFilter = BiQuadFilter.LowPassFilter(RxFormat.ClockRate, (float)(pcmSampleRate * 0.95 / 2.0), 4);
-                }
-
-                // Filter the resampled audio
-                short[] filtered = new short[resampled.Length];
-                for (int i = 0; i < resampled.Length; i++)
-                {
-                    float sample = (float)resampled[i] / (float)short.MaxValue;
-                    float flt = rxResamplingLowPassFilter.Transform(sample);
-                    filtered[i] = (short)(flt * short.MaxValue);
-                }
-
-                byte[] encodedSamples = RxEncoder.EncodeAudio(filtered, RxFormat);
-                this.RxAudioCallback((uint)encodedSamples.Length, encodedSamples);
-            }
-            else if (pcmSampleRate > RxFormat.ClockRate)
-            {
-                throw new ArgumentException("Resampling RX audio to lower sample rate not yet supported!");
-            }
-            else
-            {
-                byte[] encodedSamples = RxEncoder.EncodeAudio(pcm16Samples, RxFormat);
-                this.RxAudioCallback((uint)encodedSamples.Length, encodedSamples);
-            }
-        }
-
-        /// <summary>
-        /// Decode RTP audio into PCM16 samples
-        /// </summary>
-        /// <param name="encodedSamples"></param>
-        /// <param name="pcm16Samples"></param>
-        /// <param name="pcmSampleRate"></param>
-        private void decodeTxAudio(byte[] encodedSamples)
-        {
-            // Decode
-            short[] pcm16Samples = TxEncoder.DecodeAudio(encodedSamples, TxFormat);
-
-            // Resample if needed
-            if (txAudioSamplerate < TxFormat.ClockRate)
-            {
-                // Create a low pass filter if we haven't already
-                if (txResamplingLowPassFilter == null)
-                {
-                    txResamplingLowPassFilter = BiQuadFilter.LowPassFilter(TxFormat.ClockRate, (float)(txAudioSamplerate * 0.95 / 2.0), 4);
-                }
-
-                // Filter the raw audio
-                short[] filtered = new short[pcm16Samples.Length];
-                for (int i = 0; i < pcm16Samples.Length; i++)
-                {
-                    float sample = (float)pcm16Samples[i] / (float)short.MaxValue;
-                    float flt = txResamplingLowPassFilter.Transform(sample);
-                    filtered[i] = (short)(flt * short.MaxValue);
-                }
-
-                short[] resampled = TxEncoder.Resample(filtered, TxFormat.ClockRate, txAudioSamplerate);
-
-                TxCallback(resampled);
-            }
-            else if (txAudioSamplerate > TxFormat.ClockRate)
-            {
-                throw new ArgumentException("Resampling TX samples to higher sample rate not yet supported!");
-            }
-            else
-            {
-                TxCallback(pcm16Samples);
-            }
+            Serilog.Log.Logger.Debug("WebRTC websocket connection opened");
+            createPeerConnection();
+            connectEventHandlers();
+            configureAudio();
         }
 
         /// <summary>
         /// Create a new peer connection to a WebRTC endpoint and configure the audio tracks
         /// </summary>
-        /// <returns></returns>
-        /// <exception cref="ArgumentException"></exception>
-        public Task<RTCPeerConnection> CreatePeerConnection()
+        private void createPeerConnection()
         {
-            Log.Logger.Debug("New client connected to RTC endpoint, creating peer connection");
-            
-            // Create RTC configuration and peer connection
-            RTCConfiguration config = new RTCConfiguration
-            {
-            };
-            pc = new RTCPeerConnection(config);
+            Serilog.Log.Logger.Debug("Creating WebRTC peer connection");
 
-            // Debug print of supported audio formats
-            Log.Logger.Verbose("Client supported formats:");
-            foreach (var format in RxEncoder.SupportedFormats)
-            {
-                Log.Logger.Verbose("{FormatName}", format.FormatName);
-            }
+            // Create new peer connection
+            pc = new RTCPeerConnection(null);
+        }
 
-            // Make sure we support the desired codec
-            if (!RxEncoder.SupportedFormats.Any(f => f.FormatName == Codec))
-            {
-                Log.Logger.Error("Specified format {SpecFormat} not supported by audio encoder!", Codec);
-                throw new ArgumentException("Invalid codec specified!");
-            }
+        /// <summary>
+        /// Helper that connects all the peer connection events to their appropriate handlers/functions
+        /// </summary>
+        private void connectEventHandlers()
+        {
+            Serilog.Log.Logger.Debug("Binding event handlers for WebRTC peer connection");
 
-            // Set send-only or send-recieve mode based on whether we're RX only or not
-            if (!RxOnly)
-            {
-                RtcTrack = new MediaStreamTrack(RxEncoder.SupportedFormats.Find(f => f.FormatName == Codec), MediaStreamStatusEnum.SendRecv);
-                Log.Logger.Debug("Added send/recv audio track to peer connection");
-            } 
-            else
-            {
-                RtcTrack = new MediaStreamTrack(RxEncoder.SupportedFormats.Find(f => f.FormatName == Codec), MediaStreamStatusEnum.SendOnly);
-                Log.Logger.Debug("Added send-only audio track to peer connection");
-            }
-
-            // Add the RX track to the peer connection
-            pc.addTrack(RtcTrack);
+            // Negotiation needed handler
+            pc.onnegotiationneeded += async () => { await negotiationNeeded(); };
 
             // Audio format negotiation callback
-            pc.OnAudioFormatsNegotiated += (formats) =>
+            pc.OnAudioFormatsNegotiated += audioFormatsNegotiated;
+
+            // Connection state change callback
+            pc.onconnectionstatechange += connectionStateChange;
+
+            // ICE candidate handler for local ICE candidates
+            pc.onicecandidate += (candidate) =>
             {
-                // Get the format
-                RxFormat = formats.Find(f => f.FormatName == Codec);
-                // Set the source to use the format
-                //RxSource.SetAudioSourceFormat(RxFormat);
-                Log.Logger.Debug("Negotiated RX audio format {AudioFormat} ({ClockRate}/{Chs})", RxFormat.FormatName, RxFormat.ClockRate, RxFormat.ChannelCount);
-                // Set our wave and buffer writers to the proper sample rate
-                recFormat = new WaveFormat(RxFormat.ClockRate, 16, 1);
-                if (!RxOnly)
+                if (candidate != null)
                 {
-                    TxFormat = formats.Find(f => f.FormatName == Codec);
-                    //TxEndpoint.SetAudioSinkFormat(TxFormat);
-                    Log.Logger.Debug("Negotiated TX audio format {AudioFormat} ({ClockRate}/{Chs})", TxFormat.FormatName, TxFormat.ClockRate, TxFormat.ChannelCount);
-                }
-                // Fire the callback
-                if (RTCFormatCallback != null)
-                {
-                    RTCFormatCallback(RxFormat);
+                    Serilog.Log.Logger.Verbose("Got new ICE candidate: {candidate}, sending to console", candidate);
+                    Send(JsonSerializer.Serialize(new
+                    {
+                        type = "candidate",
+                        candidate = $"candidate:{candidate.candidate}",
+                        sdpMid = candidate.sdpMid,
+                        sdpMLineIndex = candidate.sdpMLineIndex
+                    }));
                 }
             };
 
-            // Connection state change callback
-            pc.onconnectionstatechange += ConnectionStateChange;
-
             // Debug Stuff
-            pc.OnReceiveReport += (re, media, rr) => Log.Logger.Verbose("RTCP report received {Media} from {RE}\n{Report}", media, re, rr.GetDebugSummary());
-            pc.OnSendReport += (media, sr) => Log.Logger.Verbose("RTCP report sent for {Media}\n{Summary}", media, sr.GetDebugSummary());
+            pc.OnReceiveReport += (re, media, rr) =>
+            {
+                Serilog.Log.Logger.Verbose("RTCP report received {Media} from {RE}", media, re);
+                Serilog.Log.Logger.Verbose(rr.GetDebugSummary());
+            };
+            pc.OnSendReport += (media, sr) =>
+            {
+                Serilog.Log.Logger.Verbose("RTCP report sent for {Media}", media);
+                Serilog.Log.Logger.Verbose(sr.GetDebugSummary());
+            };
             pc.GetRtpChannel().OnStunMessageSent += (msg, ep, isRelay) =>
             {
-                Log.Logger.Verbose("STUN {MessageType} sent to {Endpoint}.", msg.Header.MessageType, ep);
+                Serilog.Log.Logger.Verbose("STUN {MessageType} sent to {Endpoint}", msg.Header.MessageType, ep);
             };
             pc.GetRtpChannel().OnStunMessageReceived += (msg, ep, isRelay) =>
             {
-                Log.Logger.Verbose("STUN {MessageType} received from {Endpoint}.", msg.Header.MessageType, ep);
+                Serilog.Log.Logger.Verbose("STUN {MessageType} received from {Endpoint}", msg.Header.MessageType, ep);
                 //Log.Verbose(msg.ToString());
             };
-            pc.oniceconnectionstatechange += (state) => Log.Verbose("ICE connection state change to {ICEState}.", state);
-
-            // RTP Samples callback
-            pc.OnRtpPacketReceived += (IPEndPoint rep, SDPMediaTypesEnum media, RTPPacket rtpPkt) =>
+            pc.oniceconnectionstatechange += (state) =>
             {
-                if (media == SDPMediaTypesEnum.audio)
-                {
-                    //Log.Verbose("Got RTP audio from {Endpoint} - ({length}-byte payload)", rep.ToString(), rtpPkt.Payload.Length);
-                    if (!RxOnly)
-                    {
-                        //TxCallback(rep, media, rtpPkt);
-                        decodeTxAudio(rtpPkt.Payload);
-                    }
-                        
-                    // Save TX audio to file, if we're supposed to and the file is open
-                    if (Record && recTxWriter != null)
-                    {
-                        // Get samples
-                        byte[] samples = rtpPkt.Payload;
-                        // Decode samples
-                        short[] pcmSamples = RecTxEncoder.DecodeAudio(samples, TxFormat);
-                        // Convert to float s16
-                        float[] s16Samples = new float[pcmSamples.Length];
-                        for (int n = 0; n < pcmSamples.Length; n++)
-                        {
-                            s16Samples[n] = pcmSamples[n] / 32768f * recTxGain;
-                        }
-                        // Add to buffer
-                        recTxWriter.WriteSamples(s16Samples, 0, s16Samples.Length);
-                    }
-                }
+                Serilog.Log.Verbose("ICE connection state change to {ICEState}", state);
+            };
+            pc.OnTimeout += (mediaType) =>
+            {
+                Serilog.Log.Logger.Error("RTP timeout for {mediaType}", mediaType);
             };
 
-            return Task.FromResult(pc);
+            // Detailed logging for individual WebRTC RTP packets, keep disabled unless needed
+            /**pc.GetRtpChannel().OnRTPDataReceived += (port, ep, buffer) =>
+            {
+                if (buffer.Length >= 12)
+                {
+                    // Very minimal RTP header parse
+                    ushort seq = (ushort)((buffer[2] << 8) | buffer[3]);
+                    uint ts = (uint)((buffer[4] << 24) | (buffer[5] << 16) | (buffer[6] << 8) | buffer[7]);
+                    uint ssrc = (uint)((buffer[8] << 24) | (buffer[9] << 16) | (buffer[10] << 8) | buffer[11]);
+
+                    Serilog.Log.Logger.Verbose("Raw RTP: SSRC={SSRC} Seq={Seq} TS={TS}", ssrc, seq, ts);
+                }
+            };*/
+
+            // RTP Samples callback
+            pc.OnRtpPacketReceived += rtpPacketHandler;
+        }
+
+        /// <summary>
+        /// Handler fired when WebRTC audio negotiation is needed
+        /// </summary>
+        private async Task negotiationNeeded()
+        {
+            Serilog.Log.Logger.Verbose("WebRTC negotiation needed, sending new offer to console");
+            try
+            {
+                // Set the flag
+                makingOffer = true;
+                // Create and set a new offer
+                RTCSessionDescriptionInit offer = pc.createOffer();
+                await pc.setLocalDescription(offer);
+                // Send the offer
+                Send(JsonSerializer.Serialize(new
+                {
+                    type = "offer",
+                    sdp = offer.sdp,
+                }));
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Logger.Error(ex, "Caught exception while creating and sending local offer");
+            }
+            finally
+            {
+                makingOffer = false;
+            }
         }
 
         /// <summary>
         /// Handler for RTC connection state chagne
         /// </summary>
         /// <param name="state">the new connection state</param>
-        private async void ConnectionStateChange(RTCPeerConnectionState state)
+        private void connectionStateChange(RTCPeerConnectionState state)
         {
-            Log.Logger.Information("Peer connection state change to {PCState}.", state);
+            Serilog.Log.Logger.Information("Peer connection state change to {PCState}.", state);
 
             if (state == RTCPeerConnectionState.failed)
             {
-                Log.Logger.Error("Peer connection failed");
-                Log.Logger.Debug("Closing peer connection");
+                Serilog.Log.Logger.Error("Peer connection failed");
+                Serilog.Log.Logger.Debug("Closing peer connection");
                 pc.Close("Connection failed");
             }
             else if (state == RTCPeerConnectionState.closed)
             {
-                Log.Logger.Debug("WebRTC connection closed");
-                if (OnClose != null)
+                Serilog.Log.Logger.Debug("WebRTC connection closed");
+                if (OnWebRTCClose != null)
                 {
-                    OnClose(this, EventArgs.Empty);
+                    OnWebRTCClose(this, EventArgs.Empty);
                 }
             }
             else if (state == RTCPeerConnectionState.connected)
             {
-                Log.Logger.Debug("WebRTC connection opened");
-                if (OnConnect != null)
+                Serilog.Log.Logger.Debug("WebRTC connection opened");
+                if (OnWebRTCConnect != null)
                 {
-                    OnConnect(this, EventArgs.Empty);
+                    OnWebRTCConnect(this, EventArgs.Empty);
                 }
+            }
+        }
+
+        /// <summary>
+        /// Configure audio codecs and add the new track to the peer connection
+        /// </summary>
+        /// <exception cref="ArgumentException"></exception>
+        private void configureAudio()
+        {
+            Serilog.Log.Logger.Debug("Configuring local WebRTC media tracks");
+
+            // Debug print of supported audio formats
+            Serilog.Log.Logger.Verbose("Client supported formats:");
+            foreach (var format in RxEncoder.SupportedFormats)
+            {
+                Serilog.Log.Logger.Verbose("{FormatName}", format.FormatName);
+            }
+
+            // Make sure we support the desired codec
+            if (!RxEncoder.SupportedFormats.Any(f => f.FormatName == Codec))
+            {
+                Serilog.Log.Logger.Error("Specified format {SpecFormat} not supported by audio encoder!", Codec);
+                throw new ArgumentException("Invalid codec specified!");
+            }
+
+            // Identify the proper format
+            AudioFormat fmt = RxEncoder.SupportedFormats.Find(f => f.FormatName == Codec);
+
+            // Set send-only or send-recieve mode based on whether we're RX only or not
+            if (!RxOnly)
+            {
+                audioTrack = new MediaStreamTrack(fmt, MediaStreamStatusEnum.SendRecv);
+                pc.addTrack(audioTrack);
+                Serilog.Log.Logger.Debug("Added send/recv audio track to peer connection");
+            }
+            else
+            {
+                audioTrack = new MediaStreamTrack(fmt, MediaStreamStatusEnum.SendOnly);
+                pc.addTrack(audioTrack);
+                Serilog.Log.Logger.Debug("Added send-only audio track to peer connection");
+            }
+        }
+
+        /// <summary>
+        /// Message handler for messages received from the WebRTC websocket channel
+        /// </summary>
+        /// <param name="e"></param>
+        /// <exception cref="InvalidDataException"></exception>
+        protected override async void OnMessage(MessageEventArgs e)
+        {
+            try
+            {
+                Serilog.Log.Logger.Verbose("Got WebRTC message: {data}", e.Data);
+
+                SignalingMessage? msg = JsonSerializer.Deserialize<SignalingMessage>(e.Data);
+
+                if (msg == null)
+                    throw new InvalidDataException($"Unable to deserialize JSON: {e.Data}");
+
+                if (msg.type != null)
+                {
+                    switch (msg.type)
+                    {
+                        case "offer":
+                            await handleRemoteOffer(msg.sdp);
+                            break;
+                        case "answer":
+                            handleRemoteAnswer(msg.sdp);
+                            break;
+                        default:
+                            Serilog.Log.Logger.Warning("Unknown signaling message type: {type}", msg.type);
+                            break;
+                    }
+                } else if (msg.candidate != null)
+                {
+                    handleRemoteCandidate(msg);
+                }
+            }
+            catch (JsonException ex)
+            {
+                Serilog.Log.Logger.Error(ex, "Got error while deserializing JSON data!");
+                Serilog.Log.Logger.Error("Data: {data:l}", e.Data);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Handler for a received remote SDP offer
+        /// </summary>
+        /// <param name="sdp">the SDP string</param>
+        /// <returns></returns>
+        private async Task handleRemoteOffer(string sdp)
+        {
+            Serilog.Log.Logger.Verbose("Received remote SDP offer: {sdp:l}", sdp);
+
+            // Create an offer object from the SDP received
+            RTCSessionDescriptionInit offer = new RTCSessionDescriptionInit
+            {
+                type = RTCSdpType.offer,
+                sdp = sdp
+            };
+
+            // Determine if there is an offer collision and if we should ignore it
+            bool collision = (pc.signalingState != RTCSignalingState.stable && makingOffer);
+            ignoreOffer = !polite && collision;
+
+            // Ignore the offer if we're impolite (normally not used)
+            if (ignoreOffer)
+            {
+                Serilog.Log.Logger.Warning("Ignoring remote offer due to collision (impolite side)");
+                return;
+            }
+
+            // If we're polite (default), rollback our local description
+            if (collision)
+            {
+                Serilog.Log.Logger.Warning("Offer collision detected, rolling back (polite side)");
+                await pc.setLocalDescription(new RTCSessionDescriptionInit
+                {
+                    type = RTCSdpType.rollback
+                });
+            }
+
+            // Set the remote description from the offer
+            pc.setRemoteDescription(offer);
+
+            // Create a session description answer
+            RTCSessionDescriptionInit answer = pc.createAnswer();
+            await pc.setLocalDescription(answer);
+
+            // Send the answer
+            Send(JsonSerializer.Serialize(new
+            {
+                type = "answer",
+                sdp = answer.sdp
+            }));
+        }
+
+        /// <summary>
+        /// Handler for a received remote SDP answer
+        /// </summary>
+        /// <param name="sdp"></param>
+        /// <returns></returns>
+        private void handleRemoteAnswer(string sdp)
+        {
+            Serilog.Log.Logger.Verbose("Received remote SDP answer: {sdp:l}", sdp);
+
+            // Create a new answer object from the received SDP
+            RTCSessionDescriptionInit answer = new RTCSessionDescriptionInit
+            {
+                type = RTCSdpType.answer,
+                sdp = sdp
+            };
+            // Set the remote description based on this answer
+            pc.setRemoteDescription(answer);
+        }
+
+        /// <summary>
+        /// Handler for a received remote ICE candidate
+        /// </summary>
+        /// <param name="msg"></param>
+        private void handleRemoteCandidate(SignalingMessage msg)
+        {
+            // Ensure we got a valid candidate
+            if (string.IsNullOrWhiteSpace(msg.candidate))
+            {
+                Serilog.Log.Logger.Warning("Received empty remote ICE candidate!");
+                return;
+            }
+
+            // Create a new candidate object
+            RTCIceCandidateInit candidate = new RTCIceCandidateInit
+            {
+                candidate = msg.candidate,
+                sdpMid = msg.sdpMid,
+                sdpMLineIndex = msg.sdpMLineIndex ?? 0
+            };
+
+            // Add it to the peer connection
+            pc.addIceCandidate(candidate);
+
+            Serilog.Log.Logger.Debug("Added new remote ICE candidate to WebRTC peer connection");
+        }
+
+        /// <summary>
+        /// Restarts the peer connection
+        /// </summary>
+        /// <param name="reason">the reason for the connection restart</param>
+        /// <returns></returns>
+        private async Task RestartPeerConnection(string reason)
+        {
+            try
+            {
+                Serilog.Log.Logger.Warning("Restarting WebRTC peer connection: {reason:l}", reason);
+
+                try
+                {
+                    pc?.Close(reason);
+                    pc?.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    Serilog.Log.Logger.Error(ex, "Caught exception while closing stale WebRTC connection");
+                }
+
+                // Stop the audio monitoring
+                Serilog.Log.Logger.Verbose("Stopping sample watchdog timers");
+                txSampleTimer.Stop();
+                rxSampleTimer.Stop();
+
+                // Reset negotiation flags
+                makingOffer = false;
+                ignoreOffer = false;
+
+                // Reset the failure detection sink
+                srtpFailureSink.Reset();
+
+                // Create a new peer connection
+                pc = new RTCPeerConnection(null);
+
+                // Reconnect everything
+                connectEventHandlers();
+                configureAudio();
+
+                // Create and send new offer
+                Serilog.Log.Logger.Verbose("Creating new WebRTC offer and sending to console");
+                RTCSessionDescriptionInit offer = pc.createOffer(null);
+                await pc.setLocalDescription(offer);
+                Send(JsonSerializer.Serialize(new
+                {
+                    type = "offer",
+                    sdp = offer.sdp
+                }));
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Logger.Error(ex, "Caught exception while restarting WebRTC peer connection");
+                throw;
             }
         }
 
         public void Stop(string reason)
         {
-            Log.Logger.Warning("Stopping WebRTC with reason {Reason}", reason);
+            Serilog.Log.Logger.Warning("Stopping WebRTC with reason {Reason}", reason);
             if (pc != null)
             {
                 //Log.Logger.Information($"Closing WebRTC peer connection to {pc.AudioDestinationEndPoint.ToString()}");
@@ -377,78 +594,11 @@ namespace rc2_core
             }
             else
             {
-                Log.Logger.Debug("No WebRTC peer connections to close");
+                Serilog.Log.Logger.Debug("No WebRTC peer connections to close");
             }
-        }
-
-        /// <summary>
-        /// Start a wave recording with the specified file prefix
-        /// </summary>
-        /// <param name="prefix">filename prefix, appended with timestamp</param>
-        public void RecStartTx(string name)
-        {
-            // Stop recording RX
-            if (RecRxInProgress)
-            {
-                RecStop();
-            }
-            // Only create a new file if recording is enabled and we're not already recording TX
-            if (Record && !RecTxInProgress)
-            {
-                // Get full filepath
-                string filename = $"{RecPath}/{DateTime.Now.ToString(RecTsFmt)}_{name.Replace(' ', '_')}_TX.wav";
-                // Create writer
-                recTxWriter = new WaveFileWriter(filename, recFormat);
-                Log.Logger.Debug("Starting new TX recording: {file}", filename);
-                // Set Flag
-                RecTxInProgress = true;
-            }
-        }
-
-        public void RecStartRx(string name)
-        {
-            // Stop recording TX
-            if (RecTxInProgress)
-            {
-                RecStop();
-            }
-            // Only create a new file if recording is enabled and we're not already recording RX
-            if (Record && !RecRxInProgress)
-            {
-                // Get full filepath
-                string filename = $"{RecPath}/{DateTime.Now.ToString(RecTsFmt)}_{name.Replace(' ', '_')}_RX.wav";
-                // Create writer
-                recRxWriter = new WaveFileWriter(filename, recFormat);
-                Log.Logger.Debug("Starting new RX recording: {file}", filename);
-                // Set Flag
-                RecRxInProgress = true;
-            }
-        }
-
-        /// <summary>
-        /// Stop a wave recording
-        /// </summary>
-        public void RecStop()
-        {
-            if (recTxWriter != null)
-            {
-                recTxWriter.Close();
-                recTxWriter = null;
-            }
-            if (recRxWriter != null)
-            {
-                recRxWriter.Close();
-                recRxWriter = null;
-            }
-            RecTxInProgress = false;
-            RecRxInProgress = false;
-            Log.Logger.Debug("Stopped recording");
-        }
-
-        public void SetRecGains(double rxGainDb, double txGainDb)
-        {
-            recRxGain = (float)Math.Pow(10, rxGainDb/20);
-            recTxGain = (float)Math.Pow(10, txGainDb/20);
+            // Stop the watchdog timers
+            txSampleTimer.Stop();
+            rxSampleTimer.Stop();
         }
     }
 }

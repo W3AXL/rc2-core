@@ -232,7 +232,8 @@ namespace rc2_core
             List<SoftkeyName> softkeys = null,
             List<TextLookup> zoneLookups = null,
             List<TextLookup> chanLookups = null,
-            Action<short[]> txAudioCallback = null, int txAudioSampleRate = 8000,
+            Action<short[]> txAudioCallback = null, 
+            int txAudioSampleRate = 8000,
             Action<AudioFormat> rtcFormatCallback = null)
         {
             // Log Print
@@ -243,7 +244,11 @@ namespace rc2_core
             this.desc = desc;
 
             // Create backend server
-            server = new RC2Server(listenAddress, listenPort, this, txAudioCallback, txAudioSampleRate, rtcFormatCallback);
+            server = new RC2Server(listenAddress, listenPort, this, txAudioSampleRate);
+
+            // Bind callbacks
+            server.TxAudioCallback += txAudioCallback;
+            server.OnWebRTCFormats += rtcFormatCallback;
 
             // Create status and assign name & description
             Status = new RadioStatus();

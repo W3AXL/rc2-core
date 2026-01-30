@@ -11,11 +11,12 @@
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.5-beta1" />
-    <PackageReference Include="Serilog" Version="4.3.1-dev-02404" />
-    <PackageReference Include="SIPSorcery" Version="10.0.4-pre" />
+    <PackageReference Include="Serilog" Version="4.3.1-dev-02406" />
+    <PackageReference Include="Serilog.Extensions.Logging" Version="10.0.0" />
+    <PackageReference Include="SIPSorcery" Version="8.0.7" />
     <PackageReference Include="SIPSorcery.WebSocketSharp" Version="0.0.1" />
-    <PackageReference Include="SIPSorceryMedia.Abstractions" Version="8.0.12" />
-    <PackageReference Include="SIPSorceryMedia.Encoders" Version="10.0.4" />
+    <PackageReference Include="SIPSorceryMedia.Abstractions" Version="8.0.7" />
+    <PackageReference Include="SIPSorceryMedia.Encoders" Version="8.0.7" />
   </ItemGroup>
 
 </Project>
