@@ -264,10 +264,6 @@ namespace rc2_core
             {
                 Serilog.Log.Logger.Error("RTP timeout for {mediaType}", mediaType);
             };
-            pc.OnRemoteDescriptionChanged += (mediaType) =>
-            {
-                Serilog.Log.Logger.Warning("Remote SDP changed, now {sdp}", mediaType);
-            };
 
             // Detailed logging for individual WebRTC RTP packets, keep disabled unless needed
             /**pc.GetRtpChannel().OnRTPDataReceived += (port, ep, buffer) =>
