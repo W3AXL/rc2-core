@@ -269,8 +269,8 @@ namespace rc2_core
                 Serilog.Log.Logger.Warning("Remote SDP changed, now {sdp}", mediaType);
             };
 
-            // Detailed logging for debugging the hangup
-            pc.GetRtpChannel().OnRTPDataReceived += (port, ep, buffer) =>
+            // Detailed logging for individual WebRTC RTP packets, keep disabled unless needed
+            /**pc.GetRtpChannel().OnRTPDataReceived += (port, ep, buffer) =>
             {
                 if (buffer.Length >= 12)
                 {
@@ -281,7 +281,7 @@ namespace rc2_core
 
                     Serilog.Log.Logger.Verbose("Raw RTP: SSRC={SSRC} Seq={Seq} TS={TS}", ssrc, seq, ts);
                 }
-            };
+            };*/
 
             // RTP Samples callback
             pc.OnRtpPacketReceived += rtpPacketHandler;
