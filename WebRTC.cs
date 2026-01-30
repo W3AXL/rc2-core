@@ -30,20 +30,28 @@ namespace rc2_core
     /// </summary>
     public class SrtpFailureSink : ILogEventSink
     {
-        private static int failCount = 0;
+        private int failCount = 0;
+        private bool tracking = true;
+
         private const int failThresh = 3;
 
         public event Action<string> OnFailure;
         
         public void Emit(LogEvent ev)
         {
-            if (ev.MessageTemplate.Text.Contains("SRTP unprotect failed for audio"))
+            // Ignore if we're not tracking
+            if (!tracking) { return; }
+
+            // Check if we had an SRTP failure
+            if (ev.MessageTemplate.Text.Contains("SRTP unprotect failed"))
             {
                 failCount++;
             }
 
+            // If we exceeded the threshold, fire the handler and stop tracking
             if (failCount > failThresh)
             {
+                tracking = false;
                 OnFailure?.Invoke("SRTP failures exceeded threshold");
             }
         }
@@ -54,6 +62,7 @@ namespace rc2_core
         public void Reset()
         {
             failCount = 0;
+            tracking = true;
         }
     }
 
@@ -161,7 +170,7 @@ namespace rc2_core
 
             // Enable hook for SRTP failure monitoring
             srtpFailureSink = new SrtpFailureSink();
-            srtpFailureSink.OnFailure += (reason) => _ = RestartPeerConnection(reason);
+            srtpFailureSink.OnFailure += (reason) => RestartPeerConnection(reason);
             Serilog.Core.Logger srtpLogger = new LoggerConfiguration().WriteTo.Sink(srtpFailureSink).CreateLogger();
 
             // Enable SipSorcery Logging
@@ -261,7 +270,7 @@ namespace rc2_core
             };
 
             // Detailed logging for debugging the hangup
-            /*pc.GetRtpChannel().OnRTPDataReceived += (port, ep, buffer) =>
+            pc.GetRtpChannel().OnRTPDataReceived += (port, ep, buffer) =>
             {
                 if (buffer.Length >= 12)
                 {
@@ -270,9 +279,9 @@ namespace rc2_core
                     uint ts = (uint)((buffer[4] << 24) | (buffer[5] << 16) | (buffer[6] << 8) | buffer[7]);
                     uint ssrc = (uint)((buffer[8] << 24) | (buffer[9] << 16) | (buffer[10] << 8) | buffer[11]);
 
-                    Serilog.Log.Logger.Debug("Raw RTP: SSRC={SSRC} Seq={Seq} TS={TS}", ssrc, seq, ts);
+                    Serilog.Log.Logger.Verbose("Raw RTP: SSRC={SSRC} Seq={Seq} TS={TS}", ssrc, seq, ts);
                 }
-            };*/
+            };
 
             // RTP Samples callback
             pc.OnRtpPacketReceived += rtpPacketHandler;
@@ -283,6 +292,7 @@ namespace rc2_core
         /// </summary>
         private async Task negotiationNeeded()
         {
+            Serilog.Log.Logger.Verbose("WebRTC negotiation needed, sending new offer to console");
             try
             {
                 // Set the flag
@@ -541,6 +551,11 @@ namespace rc2_core
                     Serilog.Log.Logger.Error(ex, "Caught exception while closing stale WebRTC connection");
                 }
 
+                // Stop the audio monitoring
+                Serilog.Log.Logger.Verbose("Stopping sample watchdog timers");
+                txSampleTimer.Stop();
+                rxSampleTimer.Stop();
+
                 // Reset negotiation flags
                 makingOffer = false;
                 ignoreOffer = false;
@@ -555,7 +570,15 @@ namespace rc2_core
                 connectEventHandlers();
                 configureAudio();
 
-                // At this point the other side of the connection should trigger the renegotiation
+                // Create and send new offer
+                Serilog.Log.Logger.Verbose("Creating new WebRTC offer and sending to console");
+                RTCSessionDescriptionInit offer = pc.createOffer(null);
+                await pc.setLocalDescription(offer);
+                Send(JsonSerializer.Serialize(new
+                {
+                    type = "offer",
+                    sdp = offer.sdp
+                }));
             }
             catch (Exception ex)
             {
