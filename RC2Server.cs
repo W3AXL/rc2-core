@@ -126,28 +126,28 @@ namespace rc2_core
 
         public void RecordTx(string filename)
         {
-            rtcPeer.RecStartTx(filename);
+            rtcPeer?.RecStartTx(filename);
         }
 
         public void RecordRx(string filename)
         {
-            rtcPeer.RecStartRx(filename);
+            rtcPeer?.RecStartRx(filename);
         }
 
         public void RecordStop()
         {
-            rtcPeer.RecStop();
+            rtcPeer?.RecStop();
         }
 
         // WebRTC audio functions
         public void RxSendPCM16Samples(short[] samples, uint samplerate)
         {
-            rtcPeer.RxAudioCallback16(samples, samplerate);
+            rtcPeer?.RxAudioCallback16(samples, samplerate);
         }
 
         public void RxSendEncodedSamples(uint durationRtpUnits, byte[] encodedSamples)
         {
-            rtcPeer.RxAudioCallback(durationRtpUnits, encodedSamples);
+            rtcPeer?.RxAudioCallback(durationRtpUnits, encodedSamples);
         }
     }
 
