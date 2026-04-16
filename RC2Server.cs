@@ -79,7 +79,6 @@ namespace rc2_core
                 peer.TxCallback += TxAudioCallback;
                 peer.TxAudioSamplerate = txAudioSampleRate;
                 peer.RTCFormatCallback += OnWebRTCFormats;
-
                 rtcPeer = peer;
             });
             // Set up the regular message handler

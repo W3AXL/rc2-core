@@ -22,7 +22,7 @@ namespace rc2_core
         public void RxAudioCallback(uint durationRtpUnits, byte[] encodedSamples)
         {
             // If we don't have a peer connection, return
-            if (pc == null || audioFmt.RtpClockRate == 0)
+            if (pc == null || audioFmt.RtpClockRate == 0 || !rtcConnected)
             {
                 //Log.Logger.Debug($"Ignoring RX samples, WebRTC peer not connected");
                 return;
@@ -61,7 +61,7 @@ namespace rc2_core
         public void RxAudioCallback16(short[] pcm16Samples, uint pcmSampleRate)
         {
             // If we don't have a peer connection, return
-            if (pc == null || audioFmt.RtpClockRate == 0)
+            if (pc == null || audioFmt.RtpClockRate == 0 || !rtcConnected)
             {
                 //Log.Logger.Debug($"Ignoring RX samples, WebRTC peer not connected");
                 return;
