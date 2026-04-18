@@ -229,6 +229,7 @@ namespace rc2_core
         public Radio(
             string name, string desc, bool rxOnly,
             IPAddress listenAddress, int listenPort,
+            List<IPNetwork> allowedNetworks,
             List<SoftkeyName> softkeys = null,
             List<TextLookup> zoneLookups = null,
             List<TextLookup> chanLookups = null,
@@ -244,7 +245,7 @@ namespace rc2_core
             this.desc = desc;
 
             // Create backend server
-            server = new RC2Server(listenAddress, listenPort, this, txAudioSampleRate);
+            server = new RC2Server(listenAddress, listenPort, this, txAudioSampleRate, allowedNetworks);
 
             // Bind callbacks
             server.TxAudioCallback += txAudioCallback;

@@ -15,6 +15,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
+using System.Net.Sockets;
 using System.Runtime.Intrinsics.Arm;
 using System.Text;
 using System.Text.Json;
@@ -119,6 +120,14 @@ namespace rc2_core
 
         // List of pending remote candidates
         private List<RTCIceCandidateInit> pendingCandidates = new();
+
+        /// <summary>
+        /// Address for the WebRTC connection to bind to
+        /// </summary>
+        public IPAddress BindAddress {get; set;}
+
+        // List of allowed networks for ICE candidates (prevent issues where the console sends multiple candidates)
+        public List<IPNetwork> AllowedCandidateNetworks {get; set;}
         
         // WebRTC state flag to block sending audio when we're not connected
         private bool rtcConnected = false;
@@ -212,7 +221,23 @@ namespace rc2_core
         private void createPeerConnection()
         {
             Serilog.Log.Logger.Debug("Creating WebRTC peer connection");
+
+            if (AllowedCandidateNetworks.Count > 0)
+            {
+                Serilog.Log.Logger.Debug("    Allowed Networks:");
+                foreach (IPNetwork network in AllowedCandidateNetworks)
+                {
+                    Serilog.Log.Logger.Debug("      - {network}", network.ToString());
+                }
+            }  
+            else
+                Serilog.Log.Logger.Debug("    Allowed Networks: All (0.0.0.0/0)");
+
             RTCConfiguration config = new RTCConfiguration{};
+            if (BindAddress != null)
+            {
+                config.X_BindAddress = BindAddress;
+            }
             pc = new RTCPeerConnection(config);
         }
 
@@ -561,6 +586,55 @@ namespace rc2_core
         }
 
         /// <summary>
+        /// Extract the IP address from an ICE candidate string
+        /// </summary>
+        /// <param name="candidate"></param>
+        /// <returns></returns>
+        private IPAddress extractCandidateAddress(string candidate)
+        {
+            try
+            {
+                // Strip the "candidate:" prefix if present
+                string raw = candidate.StartsWith("candidate:") ? candidate.Substring(10) : candidate;
+                string[] parts = raw.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                // The address is at index 4 (0-based) in the candidate attribute format
+                if (parts.Length >= 5)
+                {
+                    return IPAddress.Parse(parts[4]);
+                }
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Logger.Warning(ex, "Failed to parse ICE candidate address from: {candidate}", candidate);
+            }
+            return IPAddress.None;
+        }
+
+        /// <summary>
+        /// Determine if an ICE candidate is allowed per our AllowedCandidateNetworks list
+        /// </summary>
+        /// <param name="candidate"></param>
+        /// <returns></returns>
+        private bool isCandidateAllowed(string candidate)
+        {
+            // Default to allowing everything if we have no filters
+            if (AllowedCandidateNetworks.Count == 0) return true;
+
+            // Parse the candidate's address
+            IPAddress addr = extractCandidateAddress(candidate);
+
+            // Iterate through our networks and see if it's present in any
+            foreach (IPNetwork network in AllowedCandidateNetworks)
+            {
+                if (network.Contains(addr)) return true;
+            }
+
+            // Default to returning false
+            Serilog.Log.Logger.Warning("Filtering ICE candidate {candiodate} (address {address}), not in allowed list", candidate, addr);
+            return false;
+        }
+
+        /// <summary>
         /// Handler for a received remote ICE candidate
         /// </summary>
         /// <param name="msg"></param>
@@ -578,6 +652,9 @@ namespace rc2_core
                 pendingCandidates.Clear();
                 return;
             }
+
+            // Filter by address
+            if (!isCandidateAllowed(msg.candidate)) return;
 
             // Create a new candidate object
             RTCIceCandidateInit candidate = new RTCIceCandidateInit

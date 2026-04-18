@@ -36,6 +36,8 @@ namespace rc2_core
         // Internal WebRTCPeer object
         private WebRTCPeer rtcPeer;
 
+        private List<IPNetwork> allowedNetworks = new();
+
         // Flags for TX/RX recording
         public bool TxRecording
         {
@@ -61,13 +63,15 @@ namespace rc2_core
         /// <param name="txAudioCallback">callback to handle TX audio samples from WebRTC connection</param>
         /// <param name="txAudioSampleRate">sample rate the TX audio callback is expecting</param>
         /// <param name="rtcFormatCallback">callback when WebRTC audio formats are negotiated</param>
-        public RC2Server(IPAddress address, int port, Radio _radio, int txAudioSampleRate)
+        public RC2Server(IPAddress address, int port, Radio _radio, int txAudioSampleRate, List<IPNetwork> allowedNetworks)
         {
             wss = new WebSocketServer(address, port);
             radio = _radio;
             this.txAudioSampleRate = txAudioSampleRate;
             // Bind status callback
             radio.StatusCallback += SendRadioStatus;
+            // Store allowed networks
+            this.allowedNetworks = allowedNetworks;
         }
 
         public void Start()
@@ -80,6 +84,8 @@ namespace rc2_core
                 peer.TxAudioSamplerate = txAudioSampleRate;
                 peer.RTCFormatCallback += OnWebRTCFormats;
                 rtcPeer = peer;
+                peer.BindAddress = wss.Address;
+                peer.AllowedCandidateNetworks = allowedNetworks;
             });
             // Set up the regular message handler
             wss.AddWebSocketService<ConsoleBehavior>("/", () => new ConsoleBehavior(this, this.radio));
@@ -106,6 +112,23 @@ namespace rc2_core
             Serilog.Log.Logger.Debug("Sending radio status via websocket");
             Serilog.Log.Logger.Verbose(statusJson);
             SendClientMessage("{\"status\": " + statusJson + " }");
+        }
+
+        public void SendNetworkConfig()
+        {
+            // Prepare the allowed networks
+            List<string> networkList = allowedNetworks.Select(net => net.ToString()).ToList();
+            // Serialize
+            string networkJson = JsonConvert.SerializeObject(new
+            {
+                network = new {
+                    allowedNetworks = networkList,
+                }
+            });
+            // Send
+            Serilog.Log.Logger.Debug("Sending network configuration via websocket");
+            Serilog.Log.Logger.Verbose(networkJson);
+            SendClientMessage(networkJson);
         }
 
         public void SendClientMessage(string msg)
@@ -237,6 +260,14 @@ namespace rc2_core
                     radio.Stop();
                     // Restart with reset
                     radio.Start(true);
+                }
+            }
+            else if (jsonObj.ContainsKey("network"))
+            {
+                // Network Configuration Query
+                if (jsonObj.network?.command == "query")
+                {
+                    server.SendNetworkConfig();
                 }
             }
         }
