@@ -234,10 +234,12 @@ namespace rc2_core
                 Serilog.Log.Logger.Debug("    Allowed Networks: All (0.0.0.0/0)");
 
             RTCConfiguration config = new RTCConfiguration{};
-            if (BindAddress != null)
+            // If our bind address is set and is not a loopback interface, set up the connection config to use it
+            if (BindAddress != null && !IPAddress.IsLoopback(BindAddress))
             {
                 config.X_BindAddress = BindAddress;
             }
+            // Create the new peer connection
             pc = new RTCPeerConnection(config);
         }
 
