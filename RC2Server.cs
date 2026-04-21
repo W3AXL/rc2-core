@@ -30,6 +30,8 @@ namespace rc2_core
         /// </summary>
         public Action<AudioFormat> OnWebRTCFormats;
 
+        public Action OnWebRTCConnect;
+
         // Internal RC2 radio object
         private Radio radio;
 
@@ -83,6 +85,7 @@ namespace rc2_core
                 peer.TxCallback += TxAudioCallback;
                 peer.TxAudioSamplerate = txAudioSampleRate;
                 peer.RTCFormatCallback += OnWebRTCFormats;
+                peer.OnWebRTCConnect += WebRTCConnectHandler;
                 rtcPeer = peer;
                 peer.BindAddress = wss.Address;
                 peer.AllowedCandidateNetworks = allowedNetworks;
@@ -170,6 +173,17 @@ namespace rc2_core
         public void RxSendEncodedSamples(uint durationRtpUnits, byte[] encodedSamples)
         {
             rtcPeer?.RxAudioCallback(durationRtpUnits, encodedSamples);
+        }
+
+        // WebRTC status updates
+        public void WebRTCConnectHandler(object? sender, EventArgs e)
+        {
+            // Update radio status if not already done
+            if (radio.Status.State == RadioState.Connecting)
+            {
+                radio.Status.State = RadioState.Idle;
+                Log.Logger.Debug("Radio {name} WebRTC conneted, now idle", radio.Name);
+            }
         }
     }
 
