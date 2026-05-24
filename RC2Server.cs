@@ -82,6 +82,7 @@ namespace rc2_core
             // Set up the WebRTC handler
             wss.AddWebSocketService<WebRTCPeer>("/rtc", (peer) =>
             {
+                peer.RxOnly = radio.RxOnly;
                 peer.TxCallback += TxAudioCallback;
                 peer.TxAudioSamplerate = txAudioSampleRate;
                 peer.RTCFormatCallback += OnWebRTCFormats;
