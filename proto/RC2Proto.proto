@@ -1,0 +1,302 @@
+syntax = "proto3";
+
+package radioconsole.v1;
+
+option csharp_namespace = "RadioConsole.Protocol";
+
+// ============================================================
+// Top-level envelope
+// can contain either control/stautus or audio data
+// ============================================================
+message Envelope {
+  // Per-connection counter, used for detecting out-of-sequence messages
+  uint64 envelope_seq = 1;
+
+  // Sender epoch timestamp in microseconds
+  uint64 timestamp_us = 2;
+
+  // Our payload is either a control message or an audio frame
+  oneof payload {
+    ControlMessage control = 3;
+    AudioFrame     audio   = 4;
+  }
+}
+
+// ============================================================
+// The control message can be status, control, network, etc
+// Most of these only flow in one direction
+// ============================================================
+message ControlMessage {
+  oneof body {
+    RadioCommand  radio_command  = 1; // console -> daemon
+    RadioStatus   radio_status   = 2; // daemon -> console
+    NetworkQuery  network_query  = 3; // console -> daemon
+    NetworkConfig network_config = 4; // daemon -> console
+    Ack           ack            = 5; // daemon -> console
+    Nack          nack           = 6; // daemon -> console
+    Ping          ping           = 7; // either direction
+    Pong          pong           = 8; // reply to a Ping, echoing its nonce
+    Hello         hello          = 9; // daemon -> console, sent once on connect
+    HelloAck      hello_ack      = 10; // console -> daemon, reply to hello
+  }
+}
+
+// ============================================================
+// An announcement from the daemon to the console client,
+// enumerting its hardware and audio configuration
+// ============================================================
+message Hello {
+  // Should be incremented whenever breaking changes to the protocol are made
+  uint32 protocol_version = 1; 
+
+  // Name of the daemon, includes version, etc
+  string daemon_name = 2;
+
+  // Audio codec being used by the daemon
+  AudioCodec audio_codec = 3;
+
+  // Sample rates expected by the daemon
+  uint32 rx_sample_rate_hz = 4;
+  uint32 tx_sample_rate_hz = 5;
+
+  // Duration of an audio frame, in ms
+  uint32 frame_duration_ms = 6;
+}
+
+message HelloAck {
+  // Whether the Hello was accepted by the console or not
+  bool accepted = 1;
+
+  // Only used when the hello is not accepted
+  string reason = 2;
+}
+
+// ============================================================
+// Either side of the connection can send a ping, and the other
+// side must respond as soon as possible with a pong. The ping
+// sender can then calcuate the total round-trip time by
+// comparing the time the Ping was sent to the time the Pong
+// was received. In addition, if an endpoint stops responding
+// to pings, it should be assumed that the connection has
+// errored out
+// The nonce is just a unique 32-bit number used to track the
+// ping/pong exchange
+// ============================================================
+message Ping {
+  uint32 nonce = 1;
+}
+
+message Pong {
+  uint32 nonce = 1;
+}
+
+// ============================================================
+// Valid radio control commands
+// ============================================================
+enum RadioCommandType {
+  RADIO_COMMAND_UNSPECIFIED = 0;
+  QUERY                     = 1;
+  START_TX                  = 2;
+  STOP_TX                   = 3;
+  CHAN_UP                   = 4;
+  CHAN_DOWN                 = 5;
+  BUTTON_PRESS              = 6;
+  BUTTON_RELEASE            = 7;
+  BUTTON_TOGGLE             = 8;
+  RESET                     = 9;
+}
+
+// ============================================================
+// A RadioCommand is sent from the console to the daemon
+// ============================================================
+message RadioCommand {
+  // The command type
+  RadioCommandType command = 1;
+
+  // An optional softkey name, used only for BUTTON_ commands
+  SoftkeyName      softkey = 2;
+
+  // Unique request ID, for tracking ACKs/NACKs (see below)
+  uint32 request_id = 3;
+}
+
+// Overall radio daemon state, used for daemon-radio connection state and tx/rx/idle status
+enum RadioState {
+  RADIO_STATE_UNSPECIFIED = 0; // proto3 requires a 0 in the enum, and we want it to be unique from valid values
+  DISCONNECTED            = 1;
+  CONNECTING              = 2;
+  IDLE                    = 3;
+  TRANSMITTING            = 4;
+  RECEIVING               = 5;
+  ENCRYPTED               = 6;
+  ERROR                   = 7;
+  DISCONNECTING           = 8;
+}
+
+// Whether the radio is scanning or not
+enum ScanState {
+  SCAN_STATE_UNSPECIFIED = 0;
+  NOT_SCANNING           = 1;
+  SCANNING               = 2;
+}
+
+// Priority scan state of the radio
+enum PriorityState {
+  PRIORITY_STATE_UNSPECIFIED = 0;
+  NO_PRIORITY                = 1;
+  PRIORITY_1                 = 2;
+  PRIORITY_2                 = 3;
+}
+
+// Power setting of the radio
+enum PowerState {
+  POWER_STATE_UNSPECIFIED = 0;
+  LOW_POWER               = 1;
+  MID_POWER               = 2;
+  HIGH_POWER              = 3;
+}
+
+// State of a softkey's indicator
+enum SoftkeyState {
+  SOFTKEY_STATE_UNSPECIFIED = 0;
+  SOFTKEY_OFF               = 1;
+  SOFTKEY_ON                = 2;
+  SOFTKEY_FLASHING          = 3;
+}
+
+// Valid softkey names
+enum SoftkeyName {
+  SOFTKEY_NAME_UNSPECIFIED = 0;
+  SOFTKEY_CALL             = 1;  // Signalling call
+  SOFTKEY_CHAN             = 2;  // Channel Select
+  SOFTKEY_CHUP             = 3;  // Channel Up
+  SOFTKEY_CHDN             = 4;  // Channel Down
+  SOFTKEY_DEL              = 5;  // Nuisance Delete
+  SOFTKEY_DIR              = 6;  // Talkaround/direct
+  SOFTKEY_EMER             = 7;  // Emergency
+  SOFTKEY_DYNP             = 8;  // Dynamic Priority
+  SOFTKEY_HOME             = 9;  // Home
+  SOFTKEY_LOCK             = 10; // Trunking site lock
+  SOFTKEY_LPWR             = 11; // Low power
+  SOFTKEY_MON              = 12; // Monitor (PL defeat)
+  SOFTKEY_PAGE             = 13; // Signalling page
+  SOFTKEY_PHON             = 14; // Phone operation
+  SOFTKEY_RAB1             = 15; // Repeater access button 1
+  SOFTKEY_RAB2             = 16; // Repeater access button 2
+  SOFTKEY_RCL              = 17; // Scan recall
+  SOFTKEY_SCAN             = 18; // Scan mode, etc
+  SOFTKEY_SEC              = 19; // Secure mode
+  SOFTKEY_SEL              = 20; // Select
+  SOFTKEY_SITE             = 21; // Site alias
+  SOFTKEY_TCH1             = 22; // One-touch 1
+  SOFTKEY_TCH2             = 23; // One-touch 2
+  SOFTKEY_TCH3             = 24; // One-touch 3
+  SOFTKEY_TCH4             = 25; // One-touch 4
+  SOFTKEY_TGRP             = 26; // Talkgroup select
+  SOFTKEY_TMS              = 27; // Text messaging
+  SOFTKEY_TMSQ             = 28; // Quick message
+  SOFTKEY_ZNUP             = 29; // Zone up
+  SOFTKEY_ZNDN             = 30; // Zone down
+  SOFTKEY_ZONE             = 31; // Zone select
+}
+
+// A message object representing a softkey and its state, with an optional description
+message Softkey {
+  SoftkeyName  name        = 1;
+  string       description = 2;
+  SoftkeyState state       = 3;
+}
+
+
+// The overall radio status message object which includes all of the above enums
+message RadioStatus {
+  string           name           = 1;
+  string           description    = 2;
+  string           zone_name      = 3;
+  string           channel_name   = 4;
+  string           caller_id      = 5;
+  RadioState       state          = 6;
+  ScanState        scan_state     = 7;
+  PriorityState    priority_state = 8;
+  PowerState       power_state    = 9;
+  repeated Softkey softkeys       = 10;
+  bool             monitor        = 11;
+  bool             direct         = 12;
+  bool             secure         = 13;
+
+  // Optional error message providing more error information
+  string error_msg = 14;
+}
+
+// ============================================================
+// Network configuration messages, currently unused
+// ============================================================
+message NetworkQuery {} // this is an empty message used to query for the below reponse
+
+message NetworkConfig {
+  // For now, our network config only reports a list of allowed IP subnets/addresses
+  repeated AllowedNetwork allowed_networks = 1;
+}
+
+message AllowedNetwork {
+  // The base address (e.g. 192.168.0.0)
+  string base_address = 1;
+  // The subnet mask (255.255.255.0 or similar)
+  string subnet_mask = 2;
+}
+
+// ============================================================
+// ACKs and NACKs are in response to commands. They contain the
+// radio command type and the request_id from the corresponding
+// command message
+// ============================================================
+message Ack {
+  RadioCommandType in_response_to = 1;
+  uint32           request_id     = 2;
+}
+
+message Nack {
+  RadioCommandType in_response_to = 1;
+  uint32           request_id     = 2;
+  string           reason         = 3;  // optional human-readable error reason for logging or error messages
+}
+
+// ============================================================
+// Audio channel messages
+// These replace the dedicated WebRTC audio channel and should
+// provide better and more reliable audio exchange
+// ============================================================
+
+// Where this audio frame originated (radio speaker or user microphone)
+enum AudioSource {
+  AUDIO_SOURCE_UNSPECIFIED = 0;
+  SPEAKER                  = 1;  // receive audio
+  MIC                      = 2;  // transmit audio
+}
+
+// The audio codec used for the data being sent
+enum AudioCodec {
+  AUDIO_CODEC_UNSPECIFIED = 0;
+  OPUS                    = 1;
+  PCM_S16LE               = 2;
+  ULAW                    = 3;
+}
+
+// The full audio frame message
+message AudioFrame {
+  AudioSource source = 1;
+  AudioCodec  codec  = 2;
+
+  // This is essentially the same as an RTP sequence number and is used for jitter buffer
+  // sorting and out-of-sequence rearranging
+  uint32 sequence = 3;
+
+  // Audio sample rate
+  uint32 sample_rate_hz = 4;
+
+  // Number of audio channels (should be pretty much always 1)
+  uint32 channels       = 5;
+
+  // The actual audio data bytes
+  bytes data = 6;
+}

@@ -3,6 +3,8 @@ using Newtonsoft.Json;
 using System.Net;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
+using RadioConsole.Protocol;
+using Org.BouncyCastle.Asn1.Cms;
 
 namespace rc2_core
 {
@@ -72,45 +74,6 @@ namespace rc2_core
         Off,
         On,
         Flashing
-    }
-
-    /// <summary>
-    /// These are the valid softkey bindings which can be used to setup softkeys on radios which don't have them
-    /// </summary>
-    /// Pruned from the Astro25 mobile CPS help section on button bindings
-    public enum SoftkeyName
-    {
-        CALL,   // Signalling call
-        CHAN,   // Channel Select
-        CHUP,   // Channel Up
-        CHDN,   // Channel Down
-        DEL,    // Nuisance Delete
-        DIR,    // Talkaround/direct
-        EMER,   // Emergency
-        DYNP,   // Dynamic Priority
-        HOME,   // Home
-        LOCK,   // Trunking site lock
-        LPWR,   // Low power
-        MON,    // Monitor (PL defeat)
-        PAGE,   // Signalling page
-        PHON,   // Phone operation
-        RAB1,   // Repeater access button 1
-        RAB2,   // Repeater access button 2
-        RCL,    // Scan recall
-        SCAN,   // Scan mode, etc
-        SEC,    // Secure mode
-        SEL,    // Select
-        SITE,   // Site alias
-        TCH1,   // One-touch 1
-        TCH2,   // One-touch 2
-        TCH3,   // One-touch 3
-        TCH4,   // One-touch 4
-        TGRP,   // Talkgroup select
-        TMS,    // Text messaging
-        TMSQ,   // Quick message
-        ZNUP,   // Zone up
-        ZNDN,   // Zone down
-        ZONE,   // Zone select
     }
 
     /// <summary>
@@ -211,6 +174,11 @@ namespace rc2_core
 
         // RC2 server instance
         private RC2Server server { get; set; }
+
+        /// <summary>
+        /// The delay to wait in between pressing & releasing a button in a ToggleButton command
+        /// </summary>
+        public int ButtonToggleDelayMs = 200; 
 
         /// <summary>
         /// Base radio class, does nothing on its own other than instantiate the WebRTC and Websocket connections
@@ -400,36 +368,15 @@ namespace rc2_core
         public abstract bool ReleaseButton(SoftkeyName name);
 
         /// <summary>
-        /// Callback for transmit audio recording
+        /// Press a button, wait 200 ms, then release it
         /// </summary>
-        private void RecTxCallback()
+        /// <param name="name"></param>
+        /// <returns></returns>
+        public bool ToggleButton(SoftkeyName name)
         {
-            server.RecordTx(Status.ChannelName.Trim());
-        }
-
-        /// <summary>
-        /// Callback for receive audio recording
-        /// </summary>
-        private void RecRxCallback()
-        {
-            server.RecordRx(Status.ChannelName.Trim());
-        }
-
-        /// <summary>
-        /// Stop recording callback
-        /// </summary>
-        private void RecStopCallback()
-        {
-            // Stop TX recording if we're not transmitting
-            if (server.TxRecording && Status.State != RadioState.Transmitting)
-            {
-                server.RecordStop();
-            }
-            // Stop RX recording if we're not receiving
-            if (server.RxRecording && Status.State != RadioState.Receiving)
-            {
-                server.RecordStop();
-            }
+            bool ok = PressButton(name);
+            Thread.Sleep(ButtonToggleDelayMs);
+            return ok && ReleaseButton(name);
         }
 
         /// <summary>
@@ -439,6 +386,7 @@ namespace rc2_core
         public void RxSendPCM16Samples(short[] samples, uint samplerate)
         {
             server.RxSendPCM16Samples(samples, samplerate);
+            
         }
 
         public void RxSendEncodedSamples(uint durationRtpUnits, byte[] encodedSamples)
