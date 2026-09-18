@@ -99,7 +99,7 @@ namespace rc2_core
             );
 
             // Set up TX audio callback
-            audioBridge.TxAudioCallback += radio.TxAudioCallback;
+            audioBridge.TxAudioCallback += radio.OnTxAudio;
             // Set up RX frame sending
             audioBridge.OnEncodedRxFrame += (frame) =>
             {
@@ -116,7 +116,7 @@ namespace rc2_core
             };
 
             // Bind radio status callback
-            radio.StatusCallback += SendRadioStatus;
+            radio.OnStatusUpdated += SendRadioStatus;
         }
 
         /// <summary>
@@ -217,7 +217,7 @@ namespace rc2_core
             Send(new Envelope
             {
                 TimestampUs = NowMicros(),
-                Control = new ControlMessage { RadioStatus = radio.Status.ToProto() }
+                Control = new ControlMessage { RadioStatus = radio.Status }
             });
             // Check if the radio is transmitting and update the TX audio state accordingly
             audioBridge.TxActive = radio.Status.State == RadioState.Transmitting;
@@ -344,6 +344,16 @@ namespace rc2_core
         {
             // Reset missed pongs
             missedPongs = 0;
+        }
+
+        /// <summary>
+        /// Send PCM16 audio samples for encoding and emitting to the client
+        /// </summary>
+        /// <param name="samples"></param>
+        /// <param name="samplerate"></param>
+        public void SendRxPCM16Samples(short[] samples, uint samplerate)
+        {
+            audioBridge.SendRxSamples(samples, samplerate);
         }
 
         /// <summary>

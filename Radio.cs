@@ -33,66 +33,6 @@ namespace rc2_core
         EUNHANDLED = 99
     }
 
-    // Valid states a radio can be in
-    public enum RadioState
-    {
-        Disconnected,
-        Connecting,
-        Idle,
-        Transmitting,
-        Receiving,
-        Encrypted,
-        Error,
-        Disconnecting
-    }
-
-    /// <summary>
-    /// Valid scanning states (used for scan icons on radio cards in the client)
-    /// </summary>
-    public enum ScanState
-    {
-        NotScanning,
-        Scanning
-    }
-
-    public enum PriorityState
-    {
-        NoPriority,
-        Priority1,
-        Priority2
-    }
-
-    public enum PowerState
-    {
-        LowPower,
-        MidPower,
-        HighPower
-    }
-
-    public enum SoftkeyState
-    {
-        Off,
-        On,
-        Flashing
-    }
-
-    /// <summary>
-    /// Softkey object to hold key text, description (for hover) and state
-    /// </summary>
-    public class Softkey
-    {
-        public SoftkeyName Name { get; set; }
-        public string Description { get; set; }
-        public SoftkeyState State { get; set; }
-
-        public Softkey(SoftkeyName name, string description = "")
-        {
-            Name = name;
-            Description = description;
-            State = SoftkeyState.Off;
-        }
-    }
-
     /// <summary>
     /// Class for text-replacement lookup objects
     /// </summary>
@@ -102,38 +42,6 @@ namespace rc2_core
         public string Match { get; set; }
         // The text string to replace the matched text with
         public string Replace { get; set; }
-    }
-
-    /// <summary>
-    /// Radio status object, contains all the possible radio states sent to the client during status updates
-    /// </summary>
-    public class RadioStatus
-    {
-        public string Name { get; set; } = "";
-        public string Description { get; set; } = "";
-        public string ZoneName { get; set; } = "";
-        public string ChannelName { get; set; } = "";
-        public string CallerId { get; set; } = "";
-        public RadioState State { get; set; } = RadioState.Disconnected;
-        public ScanState ScanState { get; set; } = ScanState.NotScanning;
-        public PriorityState PriorityState {get; set;} = PriorityState.NoPriority;
-        public PowerState PowerState {get; set;} = PowerState.LowPower;
-        public List<Softkey> Softkeys { get; set; } = new List<Softkey>();
-        public bool Monitor { get; set; } = false;
-        public bool Direct {get; set;} = false;
-        public bool Error { get; set; } = false;
-        public bool Secure { get; set; } = false;
-        public string ErrorMsg { get; set; } = "";
-
-        /// <summary>
-        /// Encode the RadioStatus object into a JSON string for sending to the client
-        /// </summary>
-        /// <returns></returns>
-        public string Encode()
-        {
-            // convert the status object to a string
-            return JsonConvert.SerializeObject(this, new Newtonsoft.Json.Converters.StringEnumConverter());
-        }
     }
 
     /// <summary>
@@ -165,10 +73,15 @@ namespace rc2_core
         private List<TextLookup> ZoneLookups = new List<TextLookup>();
         private List<TextLookup> ChanLookups = new List<TextLookup>();
 
-        public delegate void Callback();
-        public Callback StatusCallback { get; set; }
+        /// <summary>
+        /// Action that fires when the radio status has been updated
+        /// </summary>
+        public Action? OnStatusUpdated;
 
-        public Action<short[], int> TxAudioCallback;
+        /// <summary>
+        /// Action that fires when new TX audio samples are available
+        /// </summary>
+        public Action<short[], int>? OnTxAudio;
 
         public int RecTimeout { get; set; } = 0;
 
@@ -191,19 +104,15 @@ namespace rc2_core
         /// <param name="softkeys">list of softkeys for the radio</param>
         /// <param name="zoneLookups">list of zone text lookups</param>
         /// <param name="chanLookups">list of channel text lookups</param>
-        /// <param name="txAudioCallback">callback for handling TX audio samples from the WebRTC connection</param>
         /// <param name="txAudioSampleRate">sample rate the TX callback expects</param>
-        /// <param name="rtcFormatCallback">callback upon WebRTC format negotiation</param>
         public Radio(
             string name, string desc, bool rxOnly,
             IPAddress listenAddress, int listenPort,
             List<IPNetwork> allowedNetworks,
-            List<SoftkeyName> softkeys = null,
-            List<TextLookup> zoneLookups = null,
-            List<TextLookup> chanLookups = null,
-            Action<short[]> txAudioCallback = null, 
-            int txAudioSampleRate = 8000,
-            Action<AudioFormat> rtcFormatCallback = null)
+            List<SoftkeyName>? softkeys = null,
+            List<TextLookup>? zoneLookups = null,
+            List<TextLookup>? chanLookups = null,
+            int txAudioSampleRate = 48000)
         {
             // Log Print
             Log.Logger.Information($"Creating new RC2 radio {name} ({desc}) listening on {listenAddress}:{listenPort}");
@@ -212,32 +121,33 @@ namespace rc2_core
             this.name = name;
             this.desc = desc;
 
+            // Store RX Only
+            RxOnly = rxOnly;
+
             // Create backend server
             server = new RC2Server(listenAddress, listenPort, this, txAudioSampleRate, allowedNetworks);
-
-            // Bind callbacks
-            server.TxAudioCallback += txAudioCallback;
-            server.OnWebRTCFormats += rtcFormatCallback;
 
             // Create status and assign name & description
             Status = new RadioStatus();
             Status.Name = name;
             Status.Description = desc;
-            // Set RX Only
-            RxOnly = true;
-            // Create a softkey list
+
+            // Populate the status object softkey list
             if (softkeys != null) 
             { 
-                foreach(SoftkeyName softkey in softkeys)
+                foreach(SoftkeyName softkeyName in softkeys)
                 {
-                    Softkey key = new Softkey(softkey);
-                    Status.Softkeys.Add(key);
+                    Status.Softkeys.Add(new Softkey
+                    {
+                        Name = softkeyName,
+                        State = SoftkeyState.Unspecified
+                    });
                 }
             }
-            // Save lookups
+            
+            // Save channel & zone text lookups
             if (zoneLookups != null) { ZoneLookups = zoneLookups; }
             if (chanLookups != null) { ChanLookups = chanLookups; }
-
             Log.Logger.Debug("Loaded {zoneCount} zone text lookups", ZoneLookups.Count);
             ZoneLookups.ForEach((lookup) => {
                 Log.Logger.Verbose("    {match} -> {replace}", lookup.Match, lookup.Replace);
@@ -318,25 +228,9 @@ namespace rc2_core
                     }
                 }
             }
-            // Call recording start/stop callbacks which will trigger audio recording file start/stop if enabled
-            if (Status.State == RadioState.Transmitting)
-            {
-                Task.Delay(100).ContinueWith(t => RecTxCallback());
-            }
-            else if (Status.State == RadioState.Receiving)
-            {
-                Task.Delay(100).ContinueWith(t => RecRxCallback());
-            }
-            // Stop recording if we're not either of the above
-            else
-            {
-                if (server.RxRecording || server.TxRecording)
-                {
-                    Task.Delay(RecTimeout).ContinueWith(t => RecStopCallback());
-                }
-            }
-            // Call the next callback up
-            StatusCallback();
+
+            // Finally, call the next callback up
+            OnStatusUpdated?.Invoke();
         }
 
         /// <summary>
@@ -380,18 +274,12 @@ namespace rc2_core
         }
 
         /// <summary>
-        /// Send PCM16 samples to the WebRTC connection for encoding and transmission to the console
+        /// Send PCM16 samples to the server for encoding and transmission to the console
         /// </summary>
         /// <param name="samples">array of PCM16 samples</param>
-        public void RxSendPCM16Samples(short[] samples, uint samplerate)
+        public void SendRxPCM16Samples(short[] samples, uint samplerate)
         {
-            server.RxSendPCM16Samples(samples, samplerate);
-            
-        }
-
-        public void RxSendEncodedSamples(uint durationRtpUnits, byte[] encodedSamples)
-        {
-            server.RxSendEncodedSamples(durationRtpUnits, encodedSamples);
+            server.SendRxPCM16Samples(samples, samplerate);
         }
     }
 }
