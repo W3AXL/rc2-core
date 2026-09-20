@@ -98,7 +98,7 @@ namespace rc2_core
         /// <param name="rxOnly">whether the radio is RX only (TX disabled)</param>
         /// <param name="listenAddress">listen address for the radio</param>
         /// <param name="listenPort">listen port for the radio</param>
-        /// <param name="softkeys">list of softkeys for the radio</param>
+        /// <param name="consoleSoftkeys">list of softkeys the daemon has been configured to provide</param>
         /// <param name="zoneLookups">list of zone text lookups</param>
         /// <param name="chanLookups">list of channel text lookups</param>
         /// <param name="txAudioSampleRate">sample rate the TX callback expects</param>
@@ -106,7 +106,7 @@ namespace rc2_core
             string name, string desc, bool rxOnly,
             IPAddress listenAddress, int listenPort,
             List<IPNetwork> allowedNetworks,
-            List<SoftkeyName>? softkeys = null,
+            List<SoftkeyName>? consoleSoftkeys = null,
             List<TextLookup>? zoneLookups = null,
             List<TextLookup>? chanLookups = null,
             int txAudioSampleRate = 48000)
@@ -130,9 +130,9 @@ namespace rc2_core
             Status.Description = desc;
 
             // Populate the status object softkey list
-            if (softkeys != null) 
+            if (consoleSoftkeys != null) 
             { 
-                foreach(SoftkeyName softkeyName in softkeys)
+                foreach(SoftkeyName softkeyName in consoleSoftkeys)
                 {
                     Status.Softkeys.Add(new Softkey
                     {

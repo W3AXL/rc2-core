@@ -109,8 +109,8 @@ namespace rc2_core
                 radio.RxOnly
             );
 
-            // Set up TX audio callback
-            audioBridge.TxAudioCallback += radio.OnTxAudio;
+            // Set up TX audio callback (with an action invoke to ensure it's bound properly at runtime)
+            audioBridge.TxAudioCallback += (samples, rate) => radio.OnTxAudio?.Invoke(samples, rate);
             // Set up RX frame sending
             audioBridge.OnEncodedRxFrame += (frame) =>
             {
