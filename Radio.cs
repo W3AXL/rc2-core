@@ -1,10 +1,7 @@
 ﻿using Serilog;
 using Newtonsoft.Json;
 using System.Net;
-using SIPSorcery.Net;
-using SIPSorceryMedia.Abstractions;
 using RadioConsole.Protocol;
-using Org.BouncyCastle.Asn1.Cms;
 
 namespace rc2_core
 {
@@ -36,7 +33,7 @@ namespace rc2_core
     /// <summary>
     /// Class for text-replacement lookup objects
     /// </summary>
-    public class TextLookup
+    public struct TextLookup
     {
         // The text string to match
         public string Match { get; set; }

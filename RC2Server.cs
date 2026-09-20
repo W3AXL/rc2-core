@@ -5,18 +5,10 @@ using System.Net;
 using System.Text;
 using System.Threading.Tasks;
 using Serilog;
-using SIPSorcery.Net;
-using SIPSorcery.Media;
-using WebSocketSharp.Server;
-using SIPSorceryMedia.Abstractions;
-using WebSocketSharp;
 using Newtonsoft.Json;
 using RadioConsole.Protocol;
 using Google.Protobuf;
-using Org.BouncyCastle.Crypto.Tls;
-using Org.BouncyCastle.Ocsp;
-using NAudio.Mixer;
-using Org.BouncyCastle.Asn1.Cms;
+using Fleck;
 
 namespace rc2_core
 {
@@ -28,9 +20,25 @@ namespace rc2_core
         public const uint ProtocolVersion = 1;
 
         /// <summary>
+        /// Websocket Listen Address
+        /// </summary>
+        private readonly IPAddress address;
+        /// <summary>
+        /// Websocket Listen port
+        /// </summary>
+        private readonly int port;
+
+        /// <summary>
         /// Websocket server
         /// </summary>
-        private WebSocketServer wss {  get; set; }
+        private WebSocketServer? wss {  get; set; }
+
+        /// <summary>
+        /// List of currently connected websocket sessions
+        /// </summary>
+        private readonly List<IWebSocketConnection> sessions = new();
+
+        private readonly object sessionsLock = new();
 
         /// <summary>
         /// Internal RC2 radio object for status tracking
@@ -83,11 +91,14 @@ namespace rc2_core
         /// <param name="rtcFormatCallback">callback when WebRTC audio formats are negotiated</param>
         public RC2Server(IPAddress address, int port, Radio _radio, int radioSampleRate, List<IPNetwork> allowedNetworks)
         {
-            // Set up the websocket server
-            wss = new WebSocketServer(address, port);
+            // Store server info
+            this.address = address;
+            this.port = port;
+
             // Store the radio connection
             radio = _radio;
-            // Store allow networks
+            
+            // Store allowed networks
             this.allowedNetworks = allowedNetworks;
 
             // Create the audio bridge
@@ -124,13 +135,37 @@ namespace rc2_core
         /// </summary>
         public void Start()
         {
-            Log.Logger.Information($"Starting RC2 daemon, server listening on {wss.Address}:{wss.Port}");
-            // Set up the regular message handler
-            wss.AddWebSocketService<ConsoleBehavior>("/", () => new ConsoleBehavior(this, radio, audioBridge));
-            // Keeps the thing alive
-            wss.KeepClean = false;
-            // Start the service
-            wss.Start();
+            // Prepare the host string, properly parsing the IPV4/IPV6 "any" hosts
+            string host = ( address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any)) ? "0.0.0.0" : address.ToString();
+
+            // Create the websocket connection
+            wss = new WebSocketServer($"ws://{host}:{port}");
+
+            Log.Logger.Information($"Starting RC2 daemon, server listening on {host}:{port}");
+
+            // Start the connection and map our handlers
+            wss.Start(socket =>
+            {
+                // On open, grab the sessions lock and add the new session to our list
+                socket.OnOpen = () =>
+                {
+                    lock (sessionsLock) sessions.Add(socket);
+                    OnConsoleOpen();  
+                };
+                // On close, remove the session from the list
+                socket.OnClose = () =>
+                {
+                    lock (sessionsLock) sessions.Remove(socket);
+                    OnConsoleClose("Connection closed");
+                };
+                // Error handler
+                socket.OnError = ex => OnConsoleError(ex.Message);
+                // Binary message handler
+                socket.OnBinary = data => OnConsoleData(data);
+                // We should expect only binary messages
+                socket.OnMessage = _ => Log.Logger.Warning("Got unexpected text message from console, ignoring");
+            });
+
             // Start ping timer
             pingTimer.Elapsed += (s, e) => SendPing();
             pingTimer.Start();
@@ -143,7 +178,164 @@ namespace rc2_core
         public void Stop(string reason)
         {
             pingTimer.Stop();
-            wss.Stop();
+            wss?.Dispose();
+            lock (sessionsLock) sessions.Clear();
+        }
+
+        /// <summary>
+        /// Fired when the websocket connection is opened
+        /// </summary>
+        private void OnConsoleOpen()
+        {
+            Log.Logger.Debug("Console websocket connected, sending Hello");
+            SendHello();
+        }
+
+        /// <summary>
+        /// Fired when the websocket connection is closed
+        /// </summary>
+        /// <param name="reason"></param>
+        private void OnConsoleClose(string reason)
+        {
+            // Stop TX, just in case we're transmitting
+            radio.SetTransmit(false);
+            // Log
+            Log.Logger.Warning("Websocket connection closed, reason {reason}", reason);
+        }
+
+        /// <summary>
+        /// Fired when the websocket encounters an error
+        /// </summary>
+        /// <param name="message"></param>
+        private void OnConsoleError(string message)
+        {
+            Log.Logger.Error("Websocket encountered an error: {error}", message);   
+        }
+
+        /// <summary>
+        /// Primary handler for incoming communications from the console side
+        /// </summary>
+        /// <param name="data"></param>
+        private void OnConsoleData(byte[] data)
+        {
+            // Try to parse the raw data out to a protocol envelope
+            Envelope env;
+            try
+            {
+                env = Envelope.Parser.ParseFrom(data);
+            }
+            catch (Exception ex)
+            {
+                Log.Logger.Error(ex, "Failed to parse envelope from console message");
+                return;
+            }
+
+            // Initially, we filter all messages except HelloAcks until the console is ready
+            bool isHelloAck = env.PayloadCase == Envelope.PayloadOneofCase.Control && env.Control.BodyCase == ControlMessage.BodyOneofCase.HelloAck;
+            if (!ConsoleReady && !isHelloAck)
+            {
+                Log.Logger.Warning("Ignoring {messageType} message from console, not yet ready", env.PayloadCase == Envelope.PayloadOneofCase.Control ? env.Control.BodyCase.ToString() : "audio");
+                return;
+            }
+
+            // Handle control vs audio messages
+            switch (env.PayloadCase)
+            {
+                case Envelope.PayloadOneofCase.Control:
+                    HandleControl(env.Control);
+                    break;
+                case Envelope.PayloadOneofCase.Audio:
+                    // Ensure this is a mic frame (only type of frame that the console should send)
+                    if (env.Audio.Source == AudioSource.Mic)
+                    {
+                        audioBridge.HandleTxFrame(env.Audio);
+                    }
+                    else
+                    {
+                        Log.Logger.Warning("Got non-Mic audio from console, ignoring");
+                    }
+                    break;
+            }
+        }
+
+        /// <summary>
+        /// Handler for control messages received from the console
+        /// </summary>
+        /// <param name="msg">the control message</param>
+        private void HandleControl(ControlMessage msg)
+        {
+            switch (msg.BodyCase)
+            {
+                case ControlMessage.BodyOneofCase.HelloAck:
+                    HandleHelloAck(msg.HelloAck);
+                    break;
+                case ControlMessage.BodyOneofCase.RadioCommand:
+                    HandleRadioCommand(msg.RadioCommand);
+                    break;
+                case ControlMessage.BodyOneofCase.NetworkQuery:
+                    SendNetworkConfig();
+                    break;
+                case ControlMessage.BodyOneofCase.Ping:
+                    SendPong(msg.Ping.Nonce);
+                    break;
+                case ControlMessage.BodyOneofCase.Pong:
+                    HandlePong(msg.Pong.Nonce);
+                    break;
+            }
+        }
+
+        /// <summary>
+        /// Handler for radio commands received from the console
+        /// </summary>
+        /// <param name="cmd">the command to process</param>
+        private void HandleRadioCommand(RadioCommand cmd)
+        {
+            // A status query or a reset command don't expect an ACK, so we handle them first
+            if (cmd.Command == RadioCommandType.Query)
+            {
+                SendRadioStatus();
+                return;
+            }
+            if (cmd.Command == RadioCommandType.Reset)
+            {
+                Serilog.Log.Logger.Warning("Got reset command from console, resetting radio");
+                radio.Stop();
+                radio.Start();
+                return;
+            }
+
+            // This is a clever way to handle parsing a bool back from multiple functions that all return bool
+            bool ok = cmd.Command switch
+            {
+                // Button Commands
+                RadioCommandType.ButtonPress => radio.PressButton(cmd.Softkey),
+                RadioCommandType.ButtonRelease => radio.ReleaseButton(cmd.Softkey),
+                RadioCommandType.ButtonToggle => radio.ToggleButton(cmd.Softkey),
+                // Channel Commands
+                RadioCommandType.ChanUp => radio.ChangeChannel(false),
+                RadioCommandType.ChanDown => radio.ChangeChannel(true),
+                // TX Commands
+                RadioCommandType.StartTx => radio.SetTransmit(true),
+                RadioCommandType.StopTx => radio.SetTransmit(false),
+                // Unhandled catch-all
+                _ => LogUnhandled(cmd.Command),
+            };
+
+            if (ok)
+                SendAck(cmd.Command, cmd.RequestId);
+            else
+                SendNack(cmd.Command, cmd.RequestId, "Command failed");
+        }
+
+        /// <summary>
+        /// Small helper class to log any unhandled control messages
+        /// </summary>
+        /// <param name="cmd"></param>
+        /// <returns></returns>
+        private static bool LogUnhandled(RadioCommandType cmd)
+        {
+            Serilog.Log.Logger.Warning("Unhandled radio command {cmd}", cmd);
+            return false;
         }
 
         /// <summary>
@@ -158,7 +350,16 @@ namespace rc2_core
         /// <param name="env">the envelope to send</param>
         private void Send(Envelope env)
         {
-            wss.WebSocketServices["/"].Sessions.Broadcast(env.ToByteArray());
+            // Prepare the byte data
+            byte[] data = env.ToByteArray();
+            // Prepare a list of targets to send the message to
+            List<IWebSocketConnection> targets;
+            lock(sessionsLock) targets = sessions.ToList();
+            // Send to each connection
+            foreach (IWebSocketConnection conn in targets)
+            {
+                if (conn.IsAvailable) conn.Send(data);
+            }
         }
 
         /// <summary>
@@ -367,174 +568,6 @@ namespace rc2_core
                 TimestampUs = NowMicros(),
                 Audio = frame
             });
-        }
-    }
-
-    internal class ConsoleBehavior : WebSocketBehavior
-    {
-        /// <summary>
-        /// The RC2 server instance
-        /// </summary>
-        private RC2Server server;
-        /// <summary>
-        /// The radio instance
-        /// </summary>
-        private Radio radio;
-        /// <summary>
-        /// The audio bridge instance
-        /// </summary>
-        private AudioBridge audioBridge;
-
-        /// <summary>
-        /// The console behavior used in the websocket server
-        /// </summary>
-        /// <param name="_server"></param>
-        /// <param name="_radio"></param>
-        /// <param name="_audioBridge"></param>
-        public ConsoleBehavior(RC2Server _server, Radio _radio, AudioBridge _audioBridge)
-        {
-            server = _server;
-            radio = _radio;
-            audioBridge = _audioBridge;
-        }
-
-        protected override void OnOpen()
-        {
-            Serilog.Log.Logger.Debug("Console websocket connection opened, sending Hello");
-            server.SendHello();
-        }
-
-        protected override void OnMessage(MessageEventArgs e)
-        {
-            // All valid proto messages should be binary
-            if (!e.IsBinary)
-            {
-                Serilog.Log.Logger.Warning("Got unexpected text frame on console socket, ignoring");
-                return;
-            }
-
-            // Try to parse the binary into a proto envelope
-            Envelope env;
-            try
-            {
-                env = Envelope.Parser.ParseFrom(e.RawData);
-            }
-            catch (Exception ex)
-            {
-                Serilog.Log.Logger.Warning(ex, "Failed to parse envelope from console message");
-                return;
-            }
-
-            // Check if the received message is a HelloAck, so we can filter out all other messages before the handshake completes
-            bool isHelloAck = env.PayloadCase == Envelope.PayloadOneofCase.Control && env.Control.BodyCase == ControlMessage.BodyOneofCase.HelloAck;
-            if (!server.ConsoleReady && !isHelloAck)
-            {
-                Serilog.Log.Logger.Warning("Ignoring {messageType} message from console, connection not ready", env.PayloadCase == Envelope.PayloadOneofCase.Control ? env.Control.BodyCase.ToString() : "audio");
-                return;
-            }
-
-            // Handle the message depending on its type
-            switch (env.PayloadCase)
-            {
-                case Envelope.PayloadOneofCase.Control:
-                    HandleControl(env.Control);
-                    break;
-                case Envelope.PayloadOneofCase.Audio:
-                    // Double check that this is a mic frame and not something else
-                    if (env.Audio.Source == AudioSource.Mic)
-                    {
-                        audioBridge.HandleTxFrame(env.Audio);
-                    }
-                    break;
-            }
-        }
-
-        /// <summary>
-        /// Handler for control messages received from the console
-        /// </summary>
-        /// <param name="msg">the control message</param>
-        private void HandleControl(ControlMessage msg)
-        {
-            switch (msg.BodyCase)
-            {
-                case ControlMessage.BodyOneofCase.HelloAck:
-                    server.HandleHelloAck(msg.HelloAck);
-                    break;
-                case ControlMessage.BodyOneofCase.RadioCommand:
-                    HandleRadioCommand(msg.RadioCommand);
-                    break;
-                case ControlMessage.BodyOneofCase.NetworkQuery:
-                    server.SendNetworkConfig();
-                    break;
-                case ControlMessage.BodyOneofCase.Ping:
-                    server.SendPong(msg.Ping.Nonce);
-                    break;
-                case ControlMessage.BodyOneofCase.Pong:
-                    server.HandlePong(msg.Pong.Nonce);
-                    break;
-            }
-        }
-
-        /// <summary>
-        /// Handler for radio commands received from the console
-        /// </summary>
-        /// <param name="cmd">the command to process</param>
-        private void HandleRadioCommand(RadioCommand cmd)
-        {
-            // A status query or a reset command don't expect an ACK, so we handle them first
-            if (cmd.Command == RadioCommandType.Query)
-            {
-                server.SendRadioStatus();
-                return;
-            }
-            if (cmd.Command == RadioCommandType.Reset)
-            {
-                Serilog.Log.Logger.Warning("Got reset command from console, resetting radio");
-                radio.Stop();
-                radio.Start();
-                return;
-            }
-
-            // This is a clever way to handle parsing a bool back from multiple functions that all return bool
-            bool ok = cmd.Command switch
-            {
-                // Button Commands
-                RadioCommandType.ButtonPress => radio.PressButton(cmd.Softkey),
-                RadioCommandType.ButtonRelease => radio.ReleaseButton(cmd.Softkey),
-                RadioCommandType.ButtonToggle => radio.ToggleButton(cmd.Softkey),
-                // Channel Commands
-                RadioCommandType.ChanUp => radio.ChangeChannel(false),
-                RadioCommandType.ChanDown => radio.ChangeChannel(true),
-                // TX Commands
-                RadioCommandType.StartTx => radio.SetTransmit(true),
-                RadioCommandType.StopTx => radio.SetTransmit(false),
-                // Unhandled catch-all
-                _ => LogUnhandled(cmd.Command),
-            };
-
-            if (ok)
-                server.SendAck(cmd.Command, cmd.RequestId);
-            else
-                server.SendNack(cmd.Command, cmd.RequestId, "Command failed");
-        }
-
-        private static bool LogUnhandled(RadioCommandType cmd)
-        {
-            Serilog.Log.Logger.Warning("Unhandled radio command {cmd}", cmd);
-            return false;
-        }
-
-        protected override void OnClose(CloseEventArgs e)
-        {
-            // Stop TX just in case
-            radio.SetTransmit(false);
-            // Log
-            Serilog.Log.Logger.Warning("Websocket connection closed: {args}", e.Reason);
-        }
-
-        protected override void OnError(WebSocketSharp.ErrorEventArgs e)
-        {
-            Serilog.Log.Logger.Error("Websocket encountered an error! {error}", e.Message);
         }
     }
 }

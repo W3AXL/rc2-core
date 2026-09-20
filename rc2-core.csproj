@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <PackageReference Include="Concentus" Version="2.2.2" />
+    <PackageReference Include="Fleck" Version="1.2.0" />
     <PackageReference Include="Google.protobuf" Version="3.36.1" />
     <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.5-beta1" />
