@@ -49,6 +49,10 @@ namespace rc2_core
         /// <returns></returns>
         public static SoftkeyName GetSoftkeyName(string keyName)
         {
+            if (!SoftkeyNameMap.ContainsKey(keyName))
+            {
+                throw new ArgumentException($"No softkey lookup for softkey name {keyName}");
+            }
             return SoftkeyNameMap[keyName];
         }
     }

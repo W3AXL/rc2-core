@@ -156,6 +156,7 @@ namespace rc2_core
                 socket.OnClose = () =>
                 {
                     lock (sessionsLock) sessions.Remove(socket);
+                    pingTimer.Stop();
                     OnConsoleClose("Connection closed");
                 };
                 // Error handler
@@ -166,9 +167,8 @@ namespace rc2_core
                 socket.OnMessage = _ => Log.Logger.Warning("Got unexpected text message from console, ignoring");
             });
 
-            // Start ping timer
+            // Setup ping timer but don't start until successful handshake
             pingTimer.Elapsed += (s, e) => SendPing();
-            pingTimer.Start();
         }
 
         /// <summary>
@@ -404,6 +404,11 @@ namespace rc2_core
                 return;
             }
             Log.Logger.Information("Connected to console, audio session ready");
+            // Send initial status
+            SendRadioStatus();
+            // Start ping timer
+            pingTimer.Start();
+            // We're ready
             ConsoleReady = true;
         }
 
