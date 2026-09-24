@@ -256,7 +256,7 @@ namespace rc2_core
             Status.Name = name;
             Status.Description = desc;
             // Set RX Only
-            RxOnly = true;
+            RxOnly = rxOnly;
             // Create a softkey list
             if (softkeys != null) 
             { 
