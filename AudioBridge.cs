@@ -277,6 +277,14 @@ namespace rc2_core
         }
 
         /// <summary>
+        /// Reset the TX audio frame sequence counter
+        /// </summary>
+        public void ResetTxSequence()
+        {
+            txSequence = null;
+        }
+
+        /// <summary>
         /// Handle an incoming TX (speaker) audio frame
         /// </summary>
         /// <param name="frame">the incoming TX audio frame</param>
@@ -303,7 +311,17 @@ namespace rc2_core
             // Check for dropped frames
             if (txSequence.HasValue && frame.Sequence != txSequence.Value + 1)
             {
-                Log.Logger.Warning("Missed {missed} TX audio frames", frame.Sequence - txSequence.Value - 1);
+                // Calculate the number of missed frames
+                uint missed = frame.Sequence - txSequence.Value - 1;
+                // If we got a huge amount of missed frames, the sequence was likely reset
+                if (missed > 10_000)
+                {
+                    Log.Logger.Debug("TX audio sequence reset");
+                }
+                else
+                {
+                    Log.Logger.Warning("Missed {missed} TX audio frames", frame.Sequence - txSequence.Value - 1);
+                }
             }
             txSequence = frame.Sequence;
 

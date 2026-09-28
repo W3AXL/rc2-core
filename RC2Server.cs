@@ -81,6 +81,15 @@ namespace rc2_core
         private List<IPNetwork> allowedNetworks;
 
         /// <summary>
+        /// Cancellation token for cancelling a pending radio dekey
+        /// </summary>
+        private CancellationTokenSource? pendingDekeyCts;
+        /// <summary>
+        /// Delay before the radio is dekeyed after a stopTX request is received, to allow for remaining audio to go out
+        /// </summary>
+        private const int dekeyDelayMs = 150;
+
+        /// <summary>
         /// Create a new instance of a RadioConsole2 Websocket/WebRTC server
         /// </summary>
         /// <param name="address">listen address for the server</param>
@@ -296,11 +305,45 @@ namespace rc2_core
                 SendRadioStatus();
                 return;
             }
+
+            // Reset radio
             if (cmd.Command == RadioCommandType.Reset)
             {
                 Serilog.Log.Logger.Warning("Got reset command from console, resetting radio");
                 radio.Stop();
                 radio.Start();
+                return;
+            }
+
+            // Handle start/stop TX commands seperately from everything else below, since we have to be careful with audio
+            if (cmd.Command == RadioCommandType.StartTx)
+            {
+                // We cancel a pending dekey first
+                pendingDekeyCts?.Cancel();
+                // Start TX and send ACK if success
+                if (radio.SetTransmit(true))
+                    SendAck(cmd.Command, cmd.RequestId);
+                else
+                    SendNack(cmd.Command, cmd.RequestId, "Start TX failed");
+                // Done handling this command
+                return;
+            }
+            if (cmd.Command == RadioCommandType.StopTx)
+            {
+                // Cancel any existing dekey request
+                pendingDekeyCts?.Cancel();
+                // Create a new Cts
+                pendingDekeyCts = new CancellationTokenSource();
+                // Delay the dekey & ACK
+                Task.Delay(dekeyDelayMs, pendingDekeyCts.Token).ContinueWith(t =>
+                {
+                    if (t.IsCanceled) return;
+                    if (radio.SetTransmit(false))
+                        SendAck(cmd.Command, cmd.RequestId);
+                    else
+                        SendNack(cmd.Command, cmd.RequestId, "Stop TX failed");
+                }, TaskScheduler.Default);
+                // Done handling this command
                 return;
             }
 
