@@ -197,6 +197,7 @@ namespace rc2_core
         private void OnConsoleOpen()
         {
             Log.Logger.Debug("Console websocket connected, sending Hello");
+            audioBridge.ResetTxSequence();
             SendHello();
         }
 
