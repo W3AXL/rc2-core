@@ -155,6 +155,11 @@ namespace rc2_core
             // Start the connection and map our handlers
             wss.Start(socket =>
             {
+                // Ensure NODELAY is set so we don't delay/fragment audio packets
+                if (socket is WebSocketConnection wsConn)
+                {
+                    wsConn.Socket.NoDelay = true;
+                }
                 // On open, grab the sessions lock and add the new session to our list
                 socket.OnOpen = () =>
                 {
@@ -175,6 +180,9 @@ namespace rc2_core
                 // We should expect only binary messages
                 socket.OnMessage = _ => Log.Logger.Warning("Got unexpected text message from console, ignoring");
             });
+
+            // Set NODELAY for server to ensure we don't fragment/delay audio packets
+            wss.ListenerSocket.NoDelay = true;
 
             // Setup ping timer but don't start until successful handshake
             pingTimer.Elapsed += (s, e) => SendPing();
@@ -198,6 +206,7 @@ namespace rc2_core
         {
             Log.Logger.Debug("Console websocket connected, sending Hello");
             audioBridge.ResetTxSequence();
+            missedPongs = 0;
             SendHello();
         }
 

@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Timers;
 using Concentus;
 using Concentus.Enums;
@@ -136,6 +137,15 @@ namespace rc2_core
         private readonly SampleAccumulator rxAccumulator;
 
         /// <summary>
+        /// Stopwatch for properly timing out audio frames at 20ms intervals
+        /// </summary>
+        private readonly Stopwatch rxFrameClock;
+        /// <summary>
+        /// Tolerance in ms before we start dropping samples
+        /// </summary>
+        private const int RxDriftToleranceMs = 200;
+
+        /// <summary>
         /// The sample rate that the TX callback expects
         /// </summary>
         private readonly int txOutputSampleRate;
@@ -216,6 +226,9 @@ namespace rc2_core
             rxEncoder = OpusCodecFactory.CreateEncoder(rxFrameConfig.SampleRateHz, 1, OpusApplication.OPUS_APPLICATION_VOIP);
             rxAccumulator = new SampleAccumulator(rxFrameConfig.FrameSampleLength);
 
+            // Create frame timer stopwatch
+            rxFrameClock = new Stopwatch();
+
             if (!rxOnly)
             {
                 // Create OPUS transmit objects
@@ -256,9 +269,24 @@ namespace rc2_core
                 }
             }
 
+            // Check if we need to stop the rx frame clock
+            if (!rxFrameClock.IsRunning)
+            {
+                rxFrameClock.Start();
+            }
+
             // Push to RX accumulator and send if accumulator is filled
             rxAccumulator.Push(toEncode, frame =>
             {
+                // Check if we should drop this sample due to clock drift
+                long expectedElapsedMs = (long)rxSequence * OpusFrameConfig.FrameDurationMs;
+                long actualElapsedMs = rxFrameClock.ElapsedMilliseconds;
+                long drift = expectedElapsedMs - actualElapsedMs;
+                if (drift > RxDriftToleranceMs)
+                {
+                    Log.Logger.Debug("RX audio {drift} ms ahead of wall clock, dropping frame", drift);
+                    return;
+                }
                 // Prepare the buffer, sized to handle largest possible OPUS frame
                 byte[] encoded = new byte[4000];
                 // Encode and store actual size of encoded bytes
