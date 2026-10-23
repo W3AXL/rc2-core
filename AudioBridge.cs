@@ -144,6 +144,34 @@ namespace rc2_core
         /// Tolerance in ms before we start dropping samples
         /// </summary>
         private const int RxDriftToleranceMs = 200;
+        /// <summary>
+        /// Log RX buffer stats every 60 seconds
+        /// </summary>
+        private const int RxStatsIntervalMs = 60000;
+        /// <summary>
+        /// Whether to periodically report audio latency stats
+        /// </summary>
+        private bool reportAudioLatency = false;
+        /// <summary>
+        /// Tracker for the last time stats were reported
+        /// </summary>
+        private long rxStatsLastReportMs = 0;
+        /// <summary>
+        /// Last timestamp of a received audio frame
+        /// </summary>
+        private long rxLastCallMs = -1;
+        /// <summary>
+        /// longest gap between capture callbacks this interval
+        /// </summary>
+        private long rxMaxCallGapMs = 0;
+        /// <summary>
+        /// furthest the stream ran ahead of wall clock this interval
+        /// </summary>
+        private long rxPeakAheadMs = 0;
+        /// <summary>
+        /// frames dropped by the drift guard this interval
+        /// </summary>
+        private int rxDriftDrops = 0;
 
         /// <summary>
         /// The sample rate that the TX callback expects
@@ -215,7 +243,7 @@ namespace rc2_core
         /// <param name="txSampleRate">the sameplrate for incoming TX (mic) audio from the console connection(</param>
         /// <param name="txOutputSampleRate">the samplerate that the TX (mic) audio device expects for outgoing TX audio</param>
         /// <param name="rxOnly">whether this audio bridge should only handle outgoing (receive) audio</param>
-        public AudioBridge(int rxSampleRate, int txSampleRate, int txOutputSampleRate, bool rxOnly)
+        public AudioBridge(int rxSampleRate, int txSampleRate, int txOutputSampleRate, bool rxOnly, bool latencyReports = false)
         {
             // Store samplerates
             this.txOutputSampleRate = txOutputSampleRate;
@@ -245,6 +273,9 @@ namespace rc2_core
                     }
                 };
             }
+
+            // Store reporting config
+            reportAudioLatency = latencyReports;
         }
 
         /// <summary>
@@ -275,6 +306,37 @@ namespace rc2_core
                 rxFrameClock.Start();
             }
 
+            // Do audio reporting if we're configured
+            if (reportAudioLatency)
+            {
+                // Get the current elapsed time
+                long nowMs = rxFrameClock.ElapsedMilliseconds;
+                // Store the larger of this call gap or the current max
+                if (rxLastCallMs >= 0)
+                {
+                    rxMaxCallGapMs = Math.Max(rxMaxCallGapMs, nowMs - rxLastCallMs);
+                }
+                // Store the current time as the last call time
+                rxLastCallMs = nowMs;
+                // Report audio diagnostics if we're due
+                if (nowMs - rxStatsLastReportMs >= RxStatsIntervalMs)
+                {
+                    // Calculate current stream position
+                    long positionMs = (long)rxSequence * OpusFrameConfig.FrameDurationMs - nowMs;
+                    // Log
+                    Log.Logger.Debug(
+                        "RX audio stats (last {interval}s): stream position {position}ms vs wall clock (peak {peak}ms ahead), " +
+                        "longest gap {gap}ms, {drops} frames dropped",
+                        (nowMs - rxStatsLastReportMs) / 1000, positionMs, rxPeakAheadMs, rxMaxCallGapMs, rxDriftDrops
+                    );
+                    // Reset counters
+                    rxStatsLastReportMs = nowMs;
+                    rxMaxCallGapMs = 0;
+                    rxPeakAheadMs = 0;
+                    rxDriftDrops = 0;
+                }
+            }
+
             // Push to RX accumulator and send if accumulator is filled
             rxAccumulator.Push(toEncode, frame =>
             {
@@ -282,8 +344,10 @@ namespace rc2_core
                 long expectedElapsedMs = (long)rxSequence * OpusFrameConfig.FrameDurationMs;
                 long actualElapsedMs = rxFrameClock.ElapsedMilliseconds;
                 long drift = expectedElapsedMs - actualElapsedMs;
+                rxPeakAheadMs = Math.Max(rxPeakAheadMs, drift);
                 if (drift > RxDriftToleranceMs)
                 {
+                    rxDriftDrops++;
                     Log.Logger.Debug("RX audio {drift} ms ahead of wall clock, dropping frame", drift);
                     return;
                 }

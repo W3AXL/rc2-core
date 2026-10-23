@@ -9,6 +9,7 @@ using Newtonsoft.Json;
 using RadioConsole.Protocol;
 using Google.Protobuf;
 using Fleck;
+using System.Diagnostics;
 
 namespace rc2_core
 {
@@ -76,6 +77,35 @@ namespace rc2_core
         private const uint MaxMissedPongs = 3;
 
         /// <summary>
+        /// Whether to send periodic RTT reports
+        /// </summary>
+        private bool rttReports = false;
+        /// <summary>
+        /// Timestamp for the last time a ping was sent, used in RTT calculations
+        /// </summary>
+        private long lastPingSent;
+        /// <summary>
+        /// Minimimum measured round trip time
+        /// </summary>
+        private double rttMinMs = double.MaxValue;
+        /// <summary>
+        /// Max measured round trip time
+        /// </summary>
+        private double rttMaxMs;
+        /// <summary>
+        /// Sum tracker for averaging RTT
+        /// </summary>
+        private double rttSumMs;
+        /// <summary>
+        /// Number of samples in the RTT sum
+        /// </summary>
+        private int rttCount;
+        /// <summary>
+        /// Time of last RTT report
+        /// </summary>
+        private long lastRttReport = Stopwatch.GetTimestamp();
+
+        /// <summary>
         /// List of networks allowed to talk to this server instance
         /// </summary>
         private List<IPNetwork> allowedNetworks;
@@ -98,7 +128,7 @@ namespace rc2_core
         /// <param name="txAudioCallback">callback to handle TX audio samples from WebRTC connection</param>
         /// <param name="radioSampleRate">sample rate to use for the radio's TX & RX audio connection</param>
         /// <param name="rtcFormatCallback">callback when WebRTC audio formats are negotiated</param>
-        public RC2Server(IPAddress address, int port, Radio _radio, int radioSampleRate, List<IPNetwork> allowedNetworks)
+        public RC2Server(IPAddress address, int port, Radio _radio, int radioSampleRate, List<IPNetwork> allowedNetworks, bool reportLatency, bool reportRtt = false)
         {
             // Store server info
             this.address = address;
@@ -110,12 +140,16 @@ namespace rc2_core
             // Store allowed networks
             this.allowedNetworks = allowedNetworks;
 
+            // Store stat reporting
+            rttReports = reportRtt;
+
             // Create the audio bridge
             audioBridge = new AudioBridge(
                 radioSampleRate,
                 48000,
                 radioSampleRate,
-                radio.RxOnly
+                radio.RxOnly,
+                reportLatency
             );
 
             // Set up TX audio callback (with an action invoke to ensure it's bound properly at runtime)
@@ -566,6 +600,9 @@ namespace rc2_core
                 Log.Logger.Error("Console unresponsive ({count} missed pongs) - stopping transmit", missedPongs);
                 radio.SetTransmit(false);
             }
+            // Update the timestamp of the last ping
+            lastPingSent = Stopwatch.GetTimestamp();
+            // Send the ping
             Send(new Envelope
             {
                 TimestampUs = NowMicros(),
@@ -596,13 +633,40 @@ namespace rc2_core
         }
 
         /// <summary>
-        /// Handle a received pong and reset the missed pongs counter
+        /// Handle a received pong, reset the missed pongs counter, and do periorid RTT reporting
         /// </summary>
         /// <param name="nonce">the pong's nonce, currently unused</param>
         internal void HandlePong(uint nonce)
         {
             // Reset missed pongs
             missedPongs = 0;
+            // If the nonce for this pong matches our ping, and we're reporting RTT, perform a round-trip-time calculation
+            if (rttReports && nonce == pingNonce)
+            {
+                // Calculate RTT from the difference between now and when the ping was sent
+                double rtt = (Stopwatch.GetTimestamp() - lastPingSent) * 1000.0 / Stopwatch.Frequency;
+                // Update our min & max
+                rttMinMs = Math.Min(rttMinMs, rtt);
+                rttMaxMs = Math.Max(rttMaxMs, rtt);
+                // Increment our sum
+                rttSumMs += rtt;
+                rttCount++;
+                // Log a report if we're due
+                if ((Stopwatch.GetTimestamp() - lastRttReport) * 1000.0 / Stopwatch.Frequency >= 60000)
+                {
+                    // Print
+                    Log.Logger.Debug(
+                        "Console ping RTT (last {n} pings): min {min:F1} ms, avg {avg:F1} ms, max {max:F1} ms",
+                        rttCount, rttMinMs, rttSumMs / rttCount, rttMaxMs
+                    );
+                    // Reset
+                    rttMinMs = double.MaxValue;
+                    rttMaxMs = 0;
+                    rttSumMs = 0;
+                    rttCount = 0;
+                    lastRttReport = Stopwatch.GetTimestamp();
+                }
+            }
         }
 
         /// <summary>

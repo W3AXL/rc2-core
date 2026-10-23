@@ -109,7 +109,9 @@ namespace rc2_core
             List<SoftkeyName>? consoleSoftkeys = null,
             List<TextLookup>? zoneLookups = null,
             List<TextLookup>? chanLookups = null,
-            int txAudioSampleRate = 48000)
+            int txAudioSampleRate = 48000,
+            bool reportAudioLatency = false,
+            bool reportRtt = false)
         {
             // Log Print
             Log.Logger.Information($"Creating new RC2 radio {name} ({desc}) listening on {listenAddress}:{listenPort}");
@@ -122,7 +124,7 @@ namespace rc2_core
             RxOnly = rxOnly;
 
             // Create backend server
-            server = new RC2Server(listenAddress, listenPort, this, txAudioSampleRate, allowedNetworks);
+            server = new RC2Server(listenAddress, listenPort, this, txAudioSampleRate, allowedNetworks, reportAudioLatency, reportRtt);
 
             // Create status and assign name & description
             Status = new RadioStatus();
