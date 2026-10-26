@@ -115,9 +115,17 @@ namespace rc2_core
         /// </summary>
         private CancellationTokenSource? pendingDekeyCts;
         /// <summary>
+        /// Request ID for the STOP_TX message that's currently waiting on the pending dekey
+        /// </summary>
+        private uint? pendingDekeyRequestId;
+        /// <summary>
         /// Delay before the radio is dekeyed after a stopTX request is received, to allow for remaining audio to go out
         /// </summary>
         private const int dekeyDelayMs = 150;
+        /// <summary>
+        /// Lock object for protecting the pending dekey request variables and the start/stop TX function calls
+        /// </summary>
+        private readonly object txLock = new object();
 
         /// <summary>
         /// Create a new instance of a RadioConsole2 Websocket/WebRTC server
@@ -251,7 +259,11 @@ namespace rc2_core
         private void OnConsoleClose(string reason)
         {
             // Stop TX, just in case we're transmitting
-            radio.SetTransmit(false);
+            lock (txLock)
+            {
+                CancelPendingDekey();
+                radio.SetTransmit(false);
+            }
             // Log
             Log.Logger.Warning("Websocket connection closed, reason {reason}", reason);
         }
@@ -362,31 +374,79 @@ namespace rc2_core
             // Handle start/stop TX commands seperately from everything else below, since we have to be careful with audio
             if (cmd.Command == RadioCommandType.StartTx)
             {
-                // We cancel a pending dekey first
-                pendingDekeyCts?.Cancel();
-                // Start TX and send ACK if success
-                if (radio.SetTransmit(true))
+                // Variable to store the ID of a stop TX command that was overridden by this start TX
+                uint? overriddenStopTxId;
+                // Flag to indicate we started TX
+                bool started;
+
+                // Grab the lock
+                lock (txLock)
+                {
+                    // Cancel any pending stop TX
+                    overriddenStopTxId = CancelPendingDekey();
+                    // Start TX
+                    started = radio.SetTransmit(true);
+                }
+
+                // If we overrode a STOP_TX message, we still should ACK it
+                if (overriddenStopTxId.HasValue)
+                    SendAck(RadioCommandType.StopTx, overriddenStopTxId.Value);
+
+                // Send ack for this START_TX
+                if (started)
                     SendAck(cmd.Command, cmd.RequestId);
                 else
                     SendNack(cmd.Command, cmd.RequestId, "Start TX failed");
+
                 // Done handling this command
                 return;
             }
             if (cmd.Command == RadioCommandType.StopTx)
             {
-                // Cancel any existing dekey request
-                pendingDekeyCts?.Cancel();
-                // Create a new Cts
-                pendingDekeyCts = new CancellationTokenSource();
-                // Delay the dekey & ACK
-                Task.Delay(dekeyDelayMs, pendingDekeyCts.Token).ContinueWith(t =>
+                // Storage for the dekey cancellation token
+                CancellationTokenSource cts;
+                // Storage for the stop TX we overrode
+                uint? overriddenStopTxId;
+
+                lock(txLock)
                 {
-                    if (t.IsCanceled) return;
-                    if (radio.SetTransmit(false))
-                        SendAck(cmd.Command, cmd.RequestId);
-                    else
-                        SendNack(cmd.Command, cmd.RequestId, "Stop TX failed");
+                    // Cancel any existing dekey request
+                    overriddenStopTxId = CancelPendingDekey();
+                    // Create a new cancellation token and store the new request ID
+                    cts = pendingDekeyCts = new CancellationTokenSource();
+                    pendingDekeyRequestId = cmd.RequestId;
+                }
+
+                // If we overrode a dekey request, ACK the one we overrode
+                if (overriddenStopTxId.HasValue)
+                    SendAck(RadioCommandType.StopTx, overriddenStopTxId.Value);
+
+                // Delay the dekey and ACK
+                Task.Delay(dekeyDelayMs, cts.Token).ContinueWith(t =>
+                {
+                    try
+                    {
+                        bool stopped;
+                        lock (txLock)
+                        {
+                            // If this dekey gets cancelled, do nothing
+                            if (t.IsCanceled || cts.IsCancellationRequested) return;
+                            // Clear out and dekey
+                            pendingDekeyCts = null;
+                            pendingDekeyRequestId = null;
+                            stopped = radio.SetTransmit(false);
+                        }
+                        if (stopped)
+                            SendAck(cmd.Command, cmd.RequestId);
+                        else
+                            SendNack(cmd.Command, cmd.RequestId, "Stop TX failed");
+                    }
+                    finally
+                    {
+                        cts.Dispose();
+                    }
                 }, TaskScheduler.Default);
+
                 // Done handling this command
                 return;
             }
@@ -401,9 +461,6 @@ namespace rc2_core
                 // Channel Commands
                 RadioCommandType.ChanUp => radio.ChangeChannel(false),
                 RadioCommandType.ChanDown => radio.ChangeChannel(true),
-                // TX Commands
-                RadioCommandType.StartTx => radio.SetTransmit(true),
-                RadioCommandType.StopTx => radio.SetTransmit(false),
                 // Unhandled catch-all
                 _ => LogUnhandled(cmd.Command),
             };
@@ -412,6 +469,22 @@ namespace rc2_core
                 SendAck(cmd.Command, cmd.RequestId);
             else
                 SendNack(cmd.Command, cmd.RequestId, "Command failed");
+        }
+
+        private uint? CancelPendingDekey()
+        {
+            // If there's no pending dekey, return null
+            if (pendingDekeyCts == null)
+            {
+                return null;
+            }
+            // Cancel the pending dekey and clear the token
+            pendingDekeyCts.Cancel();
+            pendingDekeyCts = null;
+            // Store the request ID of the pending dekey message, clear it, and return it
+            uint? id = pendingDekeyRequestId;
+            pendingDekeyRequestId = null;
+            return id;
         }
 
         /// <summary>
