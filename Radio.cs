@@ -88,7 +88,18 @@ namespace rc2_core
         /// <summary>
         /// The delay to wait in between pressing & releasing a button in a ToggleButton command
         /// </summary>
-        public int ButtonToggleDelayMs = 200; 
+        public int ButtonToggleDelayMs = 200;
+
+        /// <summary>
+        /// Whether the console connection is active and ready
+        /// </summary>
+        public bool ConsoleReady
+        {
+            get
+            {
+                return server.ConsoleReady;
+            }
+        }
 
         /// <summary>
         /// Base radio class, does nothing on its own other than instantiate the WebRTC and Websocket connections

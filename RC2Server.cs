@@ -266,6 +266,8 @@ namespace rc2_core
             }
             // Log
             Log.Logger.Warning("Websocket connection closed, reason {reason}", reason);
+            // Not ready
+            ConsoleReady = false;
         }
 
         /// <summary>
@@ -677,6 +679,8 @@ namespace rc2_core
             {
                 Log.Logger.Error("Console unresponsive ({count} missed pongs) - stopping transmit", missedPongs);
                 radio.SetTransmit(false);
+                // Console isn't ready anymore
+                if (ConsoleReady) { ConsoleReady = false; }
             }
             // Update the timestamp of the last ping
             lastPingSent = Stopwatch.GetTimestamp();
@@ -718,6 +722,7 @@ namespace rc2_core
         {
             // Reset missed pongs
             missedPongs = 0;
+
             // If the nonce for this pong matches our ping, and we're reporting RTT, perform a round-trip-time calculation
             if (rttReports && nonce == pingNonce)
             {
@@ -745,6 +750,9 @@ namespace rc2_core
                     lastRttReport = Stopwatch.GetTimestamp();
                 }
             }
+
+            // If we weren't ready, now we are again
+            if (!ConsoleReady) { ConsoleReady = true; }
         }
 
         /// <summary>
