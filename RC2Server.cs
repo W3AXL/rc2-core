@@ -471,6 +471,11 @@ namespace rc2_core
                 SendNack(cmd.Command, cmd.RequestId, "Command failed");
         }
 
+        /// <summary>
+        /// Cancel a pending dekey request and return the cancelled dekey request ID
+        /// NOTE: Must be called with the txlock held
+        /// </summary>
+        /// <returns></returns>
         private uint? CancelPendingDekey()
         {
             // If there's no pending dekey, return null
