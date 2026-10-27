@@ -10,6 +10,7 @@ using RadioConsole.Protocol;
 using Google.Protobuf;
 using Fleck;
 using System.Diagnostics;
+using System.Diagnostics.Metrics;
 
 namespace rc2_core
 {
@@ -54,7 +55,12 @@ namespace rc2_core
         /// <summary>
         /// Internal flag indicatig that the console is ready to accept audio
         /// </summary>
-        internal bool ConsoleReady { get; private set; } = false;
+        internal bool ConsoleReady { get; private set; }
+
+        /// <summary>
+        /// State tracker for completed handshake with console
+        /// </summary>
+        private volatile bool handshakeComplete = false;
 
         /// <summary>
         /// Ping timer for the socket keepalive test
@@ -267,6 +273,7 @@ namespace rc2_core
             // Log
             Log.Logger.Warning("Websocket connection closed, reason {reason}", reason);
             // Not ready
+            handshakeComplete = false;
             ConsoleReady = false;
         }
 
@@ -299,7 +306,7 @@ namespace rc2_core
 
             // Initially, we filter all messages except HelloAcks until the console is ready
             bool isHelloAck = env.PayloadCase == Envelope.PayloadOneofCase.Control && env.Control.BodyCase == ControlMessage.BodyOneofCase.HelloAck;
-            if (!ConsoleReady && !isHelloAck)
+            if (!handshakeComplete && !isHelloAck)
             {
                 Log.Logger.Warning("Ignoring {messageType} message from console, not yet ready", env.PayloadCase == Envelope.PayloadOneofCase.Control ? env.Control.BodyCase.ToString() : "audio");
                 return;
@@ -535,6 +542,7 @@ namespace rc2_core
         internal void SendHello()
         {
             // If we're sending a hello, we're not ready
+            handshakeComplete = false;
             ConsoleReady = false;
 
             // Prepare the hello message
@@ -576,6 +584,7 @@ namespace rc2_core
             // Start ping timer
             pingTimer.Start();
             // We're ready
+            handshakeComplete = true;
             ConsoleReady = true;
         }
 
@@ -677,10 +686,13 @@ namespace rc2_core
             missedPongs++;
             if (missedPongs > MaxMissedPongs && radio.Status.State != RadioState.Disconnected)
             {
-                Log.Logger.Error("Console unresponsive ({count} missed pongs) - stopping transmit", missedPongs);
-                radio.SetTransmit(false);
-                // Console isn't ready anymore
-                if (ConsoleReady) { ConsoleReady = false; }
+                // If we were connected and ready, print a log, stop TX, and flag we're no longer ready
+                if (ConsoleReady)
+                {
+                    Log.Logger.Error("Console unresponsive ({count} missed pongs) - stopping transmit", missedPongs);
+                    radio.SetTransmit(false);
+                    ConsoleReady = false;
+                }
             }
             // Update the timestamp of the last ping
             lastPingSent = Stopwatch.GetTimestamp();
@@ -752,7 +764,11 @@ namespace rc2_core
             }
 
             // If we weren't ready, now we are again
-            if (!ConsoleReady) { ConsoleReady = true; }
+            if (handshakeComplete && !ConsoleReady)
+            {
+                Log.Logger.Information("Console responding again, ready");
+                ConsoleReady = true;
+            }
         }
 
         /// <summary>
