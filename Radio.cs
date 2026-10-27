@@ -1,5 +1,4 @@
 ﻿using Serilog;
-using Newtonsoft.Json;
 using System.Net;
 using RadioConsole.Protocol;
 
